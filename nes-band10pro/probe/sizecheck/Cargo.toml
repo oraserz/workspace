@@ -1,0 +1,10 @@
+[package]
+name = "sizecheck"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+x-nes = { path = "../../vendor/x-nes" }
+
+[workspace]

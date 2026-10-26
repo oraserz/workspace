@@ -1,0 +1,34 @@
+[package]
+name = "nesband10pro"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+default = []
+# `canopus build` always enables `device` plus the exact target feature.
+# `canopus-target-private` carries the recovered LVX/native-app bindings.
+device = ["dep:canopus-target-private"]
+target-xiaomi-band-10-pro-3-101-043 = [
+    "device",
+    "canopus-target-private/target-xiaomi-band-10-pro-3-101-043",
+]
+
+[dependencies]
+canopus-abi = { path = "/workspace/nes-band10pro/vendor/Canopus/sdk/rust/canopus-abi" }
+canopus-runtime = { path = "/workspace/nes-band10pro/vendor/Canopus/sdk/rust/canopus-runtime" }
+canopus-target-private = { path = "/workspace/nes-band10pro/vendor/Canopus/sdk/rust/canopus-target-private", optional = true, default-features = false }
+# Vendored x-nes (see docs/01-research.md for the local patches).
+x-nes = { path = "../vendor/x-nes", default-features = false }
+
+# A standalone crate, also when it lives inside a Canopus checkout.
+[workspace]
+
+[profile.release]
+panic = "abort"
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
