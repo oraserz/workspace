@@ -1,0 +1,187 @@
+diff --git a/Cargo.toml b/Cargo.toml
+index ec3a016..3a0d976 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -32,7 +32,7 @@ std = []
+ 
+ [lib]
+ name = "nes"
+-crate-type = ["lib", "cdylib", "staticlib"]
++crate-type = ["rlib"]
+ 
+ [[example]]
+ name = "window"
+diff --git a/src/apu/mod.rs b/src/apu/mod.rs
+index 43f2051..97397dc 100644
+--- a/src/apu/mod.rs
++++ b/src/apu/mod.rs
+@@ -256,6 +256,21 @@ impl Default for Apu {
+ }
+ 
+ impl Apu {
++    /// Initialise an `Apu` in place, avoiding a multi-KiB stack temporary.
++    ///
++    /// # Safety
++    /// `ptr` must be valid, aligned and uninitialised for `Apu`.
++    pub unsafe fn init_in(ptr: *mut Self) {
++        unsafe {
++            core::ptr::write_bytes(ptr.cast::<u8>(), 0, core::mem::size_of::<Self>());
++            (*ptr).p1.is_pulse1 = true;
++            (*ptr).dmc.buffer_empty = true;
++            (*ptr).dmc.timer = 1;
++            (*ptr).dmc.timer_load = DMC_RATES[0];
++            (*ptr).sample_period = ((CPU_HZ << 16) / 44100) as u32;
++        }
++    }
++
+     pub fn new() -> Self {
+         Self {
+             cycles: 0,
+diff --git a/src/bus.rs b/src/bus.rs
+index ee26071..4a1f2d7 100644
+--- a/src/bus.rs
++++ b/src/bus.rs
+@@ -19,6 +19,19 @@ pub struct Bus {
+ }
+ 
+ impl Bus {
++    /// Initialise a `Bus` in place, avoiding a ~76 KiB stack temporary.
++    ///
++    /// # Safety
++    /// `ptr` must be valid, aligned and uninitialised for `Bus`.
++    pub unsafe fn init_in(ptr: *mut Self, mapper: Mapper) {
++        unsafe {
++            core::ptr::write_bytes(ptr.cast::<u8>(), 0, core::mem::size_of::<Self>());
++            (*ptr).mapper = mapper;
++            Ppu::init_in(core::ptr::addr_of_mut!((*ptr).ppu));
++            Apu::init_in(core::ptr::addr_of_mut!((*ptr).apu));
++        }
++    }
++
+     pub fn new(mapper: Mapper) -> Self {
+         Self {
+             ram: [0; 2048],
+diff --git a/src/lib.rs b/src/lib.rs
+index 12b6222..7ee19db 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -165,6 +165,21 @@ pub struct Emulator {
+ }
+ 
+ impl Emulator {
++    /// Create an emulator in caller-provided storage, bypassing the large
++    /// by-value return of [`Emulator::new`] on small MCU stacks.
++    ///
++    /// # Safety
++    /// `ptr` must be valid, aligned and uninitialised for `Emulator`.
++    pub unsafe fn init_in(ptr: *mut Self, mapper: Mapper) {
++        unsafe {
++            let cpu = core::ptr::addr_of_mut!((*ptr).cpu);
++            core::ptr::write(cpu, CpuRp2a03::new(0));
++            let bus = core::ptr::addr_of_mut!((*ptr).bus);
++            Bus::init_in(bus, mapper);
++            reset(&mut *cpu, &mut *bus);
++        }
++    }
++
+     /// Create a new emulator from a ROM's mapper.
+     pub fn new(mapper: Mapper) -> Self {
+         let mut cpu = CpuRp2a03::new(0);
+diff --git a/src/mapper/common.rs b/src/mapper/common.rs
+index c98ebaa..df85d71 100644
+--- a/src/mapper/common.rs
++++ b/src/mapper/common.rs
+@@ -3,6 +3,7 @@
+ //! These reduce boilerplate for the most common NES mapper patterns:
+ //! PRG/CHR banking, mirroring control, scanline IRQs, etc.
+ 
++use alloc::vec;
+ use alloc::vec::Vec;
+ 
+ // ---------------------------------------------------------------------------
+diff --git a/src/mapper/konami/vrc1.rs b/src/mapper/konami/vrc1.rs
+index 33ad0eb..33ddcde 100644
+--- a/src/mapper/konami/vrc1.rs
++++ b/src/mapper/konami/vrc1.rs
+@@ -1,4 +1,5 @@
+ use super::super::MapperImpl;
++use alloc::vec::Vec;
+ /// Konami VRC1 (iNES mapper 75)
+ ///
+ /// - PRG: 16 KB switchable bank at `$8000`, 16 KB fixed (last bank) at `$C000`
+diff --git a/src/mapper/konami/vrc2_4.rs b/src/mapper/konami/vrc2_4.rs
+index c82699c..4ca9c2a 100644
+--- a/src/mapper/konami/vrc2_4.rs
++++ b/src/mapper/konami/vrc2_4.rs
+@@ -1,4 +1,5 @@
+ use super::super::MapperImpl;
++use alloc::vec::Vec;
+ use crate::mapper::common::mirror;
+ 
+ /// VRC2 / VRC4 variant selector.
+diff --git a/src/mapper/konami/vrc3.rs b/src/mapper/konami/vrc3.rs
+index 9341589..f01cb08 100644
+--- a/src/mapper/konami/vrc3.rs
++++ b/src/mapper/konami/vrc3.rs
+@@ -1,4 +1,5 @@
+ use super::super::MapperImpl;
++use alloc::vec::Vec;
+ 
+ /// Konami VRC3 (iNES mapper 73)
+ ///
+diff --git a/src/mapper/konami/vrc6.rs b/src/mapper/konami/vrc6.rs
+index 88ee98f..55452a4 100644
+--- a/src/mapper/konami/vrc6.rs
++++ b/src/mapper/konami/vrc6.rs
+@@ -1,4 +1,5 @@
+ use super::super::MapperImpl;
++use alloc::vec::Vec;
+ use crate::mapper::common::ScanlineIrq;
+ use crate::mapper::common::mirror;
+ 
+diff --git a/src/mapper/konami/vrc7.rs b/src/mapper/konami/vrc7.rs
+index c447790..1e549e2 100644
+--- a/src/mapper/konami/vrc7.rs
++++ b/src/mapper/konami/vrc7.rs
+@@ -1,4 +1,5 @@
+ use super::super::MapperImpl;
++use alloc::vec::Vec;
+ use crate::mapper::common::ScanlineIrq;
+ use crate::mapper::common::mirror;
+ 
+diff --git a/src/ppu/mod.rs b/src/ppu/mod.rs
+index c6285b7..1a1066e 100644
+--- a/src/ppu/mod.rs
++++ b/src/ppu/mod.rs
+@@ -77,6 +77,18 @@ impl Default for Ppu {
+ }
+ 
+ impl Ppu {
++    /// Initialise a `Ppu` in place, so a 64 KiB struct never lives on the stack.
++    ///
++    /// # Safety
++    /// `ptr` must be valid, aligned and uninitialised for `Ppu`.
++    pub unsafe fn init_in(ptr: *mut Self) {
++        unsafe {
++            core::ptr::write_bytes(ptr.cast::<u8>(), 0, core::mem::size_of::<Self>());
++            (*ptr).odd_frame = true;
++            (*ptr).sprite_zero_hit_possible = true;
++        }
++    }
++
+     pub fn new() -> Self {
+         Self {
+             vram: [0; 0x1000],
+diff --git a/src/ppu/registers.rs b/src/ppu/registers.rs
+index c02f9ee..baa0dac 100644
+--- a/src/ppu/registers.rs
++++ b/src/ppu/registers.rs
+@@ -84,7 +84,7 @@ impl Ppu {
+             self.w = 1;
+         } else {
+             self.t =
+-                (self.t & 0xFC1F) | (((val as u16) & 0x07) << 12) | (((val as u16) & 0xF8) << 2);
++                (self.t & 0x0C1F) | (((val as u16) & 0x07) << 12) | (((val as u16) & 0xF8) << 2);
+             self.w = 0;
+         }
+     }

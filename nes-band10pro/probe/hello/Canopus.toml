@@ -1,0 +1,16 @@
+schema = 1
+
+[module]
+id = "hello"
+version = "0.1.0"
+version_code = 1
+kind = "target"
+language = "c"
+lifecycle = "removable"
+canopus_abi = "2"
+
+[build]
+sources = ["src/hello.c"]
+
+[targets]
+include = ["xiaomi-band-10-pro-3.101.043"]
