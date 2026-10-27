@@ -1,0 +1,16 @@
+schema = 1
+
+[module]
+id = "nespro"
+version = "0.1.0"
+version_code = 1
+kind = "target"
+language = "rust"
+lifecycle = "removable"
+canopus_abi = "2"
+
+[build]
+sources = ["Cargo.toml"]
+
+[targets]
+include = ["xiaomi-band-10-pro-3.101.043"]

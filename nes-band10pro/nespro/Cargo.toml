@@ -1,0 +1,24 @@
+[package]
+name = "nespro"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+default = []
+# Selected by `canopus build` for the device build.
+device = []
+
+[dependencies]
+canopus-abi = { path = "/workspace/nes-band10pro/vendor/canopus/sdk/rust/canopus-abi" }
+canopus-runtime = { path = "/workspace/nes-band10pro/vendor/canopus/sdk/rust/canopus-runtime" }
+# Exact-target private LVGL facade + generated firmware symbol constants.
+canopus-target-private = { path = "/workspace/nes-band10pro/vendor/canopus/sdk/rust/canopus-target-private", default-features = false }
+canopus-target-generated = { path = "/workspace/nes-band10pro/vendor/canopus/sdk/rust/canopus-target-generated", default-features = false }
+# NES core. no_std build; the module supplies the allocator and panic handler.
+x-nes = { path = "/workspace/nes-band10pro/vendor/x-nes", default-features = false }
+
+# A standalone crate, also when it lives inside a Canopus checkout.
+[workspace]
