@@ -1,0 +1,26 @@
+[package]
+name = "nes_band"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97"
+
+[lib]
+crate-type = ["staticlib"]
+
+[features]
+default = []
+device = ["dep:canopus-target-generated", "dep:canopus-target-private"]
+target-xiaomi-band-10-pro-3-101-043 = [
+    "device",
+    "canopus-target-private/target-xiaomi-band-10-pro-3-101-043",
+]
+
+[dependencies]
+canopus-abi = { path = "../vendor/Canopus/sdk/rust/canopus-abi" }
+canopus-runtime = { path = "../vendor/Canopus/sdk/rust/canopus-runtime" }
+canopus-target-generated = { path = "../vendor/Canopus/sdk/rust/canopus-target-generated", optional = true, default-features = false }
+canopus-target-private = { path = "../vendor/Canopus/sdk/rust/canopus-target-private", optional = true, default-features = false }
+x-nes = { path = "../lib/x-nes", default-features = false }
+
+# Standalone crate, also when it lives inside a Canopus checkout.
+[workspace]

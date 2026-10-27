@@ -1,0 +1,7 @@
+[package]
+name = "nes_band_host"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+x-nes = { path = "../lib/x-nes", default-features = true }
