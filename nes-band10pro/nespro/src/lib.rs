@@ -38,15 +38,20 @@ const MAGIC: u32 = 0x4E455350; // "NESP"
 /// steals UI time. Fire often and keep each slice small instead of doing a
 /// whole frame at once.
 const TIMER_PERIOD_MS: u32 = 10;
-/// Wall-clock budget for one emulation slice (the rest of the tick stays with
-/// the UI task).
-const SLICE_TARGET_MS: u32 = 4;
+/// Share of the observed tick period given to emulation, so the slice adapts
+/// when the pump itself runs slower than the requested 10 ms.
+const DUTY_PERCENT: u32 = 50;
+const SLICE_MS_MIN: u32 = 3;
+const SLICE_MS_MAX: u32 = 30;
 /// Adaptive instruction budget per slice, in instructions.
-const BUDGET_START: u32 = 1024;
-const BUDGET_MIN: u32 = 256;
-const BUDGET_MAX: u32 = 4096;
+const BUDGET_START: u32 = 4096;
+const BUDGET_MIN: u32 = 512;
+const BUDGET_MAX: u32 = 16384;
 /// Never republish faster than this; the panel cannot show more anyway.
 const PUBLISH_MIN_MS: u32 = 50;
+/// If the UI never consumes a queued frame, stop waiting after this many
+/// ticks instead of stalling the emulator forever.
+const PENDING_MAX_TICKS: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Context + allocator
@@ -240,6 +245,8 @@ static FRAMES: AtomicU32 = AtomicU32::new(0);
 static PUBLISHED: AtomicU32 = AtomicU32::new(0);
 static SLICE_SUM_MS: AtomicU32 = AtomicU32::new(0);
 static SLICE_MAX_MS: AtomicU32 = AtomicU32::new(0);
+static LAST_TICK_MS: AtomicU32 = AtomicU32::new(0);
+static PENDING_TICKS: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // Emulator state
@@ -474,12 +481,30 @@ extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_vo
             FRAME_PENDING.store(0, Ordering::Release);
         }
         if FRAME_PENDING.load(Ordering::Acquire) != 0 {
-            return;
+            let waited = PENDING_TICKS.fetch_add(1, Ordering::Relaxed) + 1;
+            if waited < PENDING_MAX_TICKS {
+                return;
+            }
+            // The UI never consumed the queued frame (lost post or a stalled
+            // job queue). Drop it rather than freezing the emulator.
+            FRAME_PENDING.store(0, Ordering::Release);
         }
+        PENDING_TICKS.store(0, Ordering::Relaxed);
         let start = now_ms(c);
         if SESSION_START_MS.load(Ordering::Acquire) == 0 {
             SESSION_START_MS.store(start.max(1), Ordering::Release);
         }
+        // Adapt the slice to the *observed* pump period: on this firmware the
+        // requested 10 ms can stretch, and a fixed 4 ms would then starve the
+        // core.
+        let previous_tick = LAST_TICK_MS.swap(start.max(1), Ordering::Release);
+        let period = if previous_tick == 0 {
+            TIMER_PERIOD_MS
+        } else {
+            start.wrapping_sub(previous_tick).max(1).min(200)
+        };
+        let slice_target = (period.saturating_mul(DUTY_PERCENT) / 100)
+            .clamp(SLICE_MS_MIN, SLICE_MS_MAX);
         TICKS.fetch_add(1, Ordering::Relaxed);
 
         let emu = &mut *EMU.as_mut_ptr();
@@ -495,9 +520,9 @@ extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_vo
                 frame_done = true;
                 break;
             }
-            if (executed & 31) == 0 {
+            if (executed & 63) == 0 {
                 let elapsed = now_ms(c).wrapping_sub(start);
-                if elapsed >= SLICE_TARGET_MS {
+                if elapsed >= slice_target {
                     time_limited = true;
                     break;
                 }
@@ -510,7 +535,7 @@ extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_vo
             SLICE_MAX_MS.store(slice_ms, Ordering::Relaxed);
         }
         if time_limited && slice_ms > 0 {
-            let next = (budget.saturating_mul(SLICE_TARGET_MS) / slice_ms)
+            let next = (budget.saturating_mul(slice_target) / slice_ms)
                 .clamp(BUDGET_MIN, BUDGET_MAX);
             BUDGET.store(next, Ordering::Release);
         } else if !frame_done && executed >= budget {
@@ -672,6 +697,8 @@ extern "C" fn page_on_create(
         PUBLISHED.store(0, Ordering::Release);
         SLICE_SUM_MS.store(0, Ordering::Release);
         SLICE_MAX_MS.store(0, Ordering::Release);
+        LAST_TICK_MS.store(0, Ordering::Release);
+        PENDING_TICKS.store(0, Ordering::Release);
         PAGE_ACTIVE.store(1, Ordering::Release);
         start_runtime(c);
     }
@@ -848,8 +875,8 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
         | FLAG_REGISTERS_LAUNCHER_ENTRY
         | FLAG_APP_UNREGISTER_REBOOT_REQUIRED,
     module_id: pack(b"nespro"),
-    module_version: pack(b"0.1.2"),
-    build_id: pack(b"nespro-0.1.2"),
+    module_version: pack(b"0.1.3"),
+    build_id: pack(b"nespro-0.1.3"),
     target_id: pack(env!("CANOPUS_TARGET_ID").as_bytes()),
     prepare: Some(canopus_mod_prepare),
     activate: Some(activate),

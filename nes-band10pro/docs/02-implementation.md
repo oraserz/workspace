@@ -8,7 +8,7 @@
 │   ├── Canopus.toml            # module id/version/kind=target, targets = 043
 │   ├── Cargo.toml              # staticlib；依赖 canopus-abi/runtime/target-private/target-generated + x-nes
 │   ├── build/xiaomi-band-10-pro-3.101.043/nespro.elf
-│   ├── dist/nespro-0.1.2.canopus
+│   ├── dist/nespro-0.1.3.canopus
 │   └── src/
 │       ├── lib.rs              # 生命周期、launcher 注册、LVGL 页面、定时器、分配器
 │       └── nes_frame.rs        # 调色板 → RGB565 转换（设备与主机共用）
@@ -27,7 +27,7 @@
 
 **模块描述符**（`canopus_module_descriptor`，ABI 2）：
 
-- `module_id = "nespro"`、`version = "0.1.2"`、`target_id = env!("CANOPUS_TARGET_ID")`
+- `module_id = "nespro"`、`version = "0.1.3"`、`target_id = env!("CANOPUS_TARGET_ID")`
 - flags：`FLAG_HAS_NATIVE_APP | FLAG_REGISTERS_LAUNCHER_ENTRY | FLAG_APP_UNREGISTER_REBOOT_REQUIRED`
 - 生命周期：`prepare` 保存 ctx；`activate` 记录日志；`stop` 释放标记；`query` 返回 `0x4E455350`（"NESP"）
 
@@ -76,7 +76,7 @@ CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus canopus build
 # 3) 打包并校验
 CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus canopus package --build
 CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus \
-  canopus package verify dist/nespro-0.1.2.canopus
+  canopus package verify dist/nespro-0.1.3.canopus
 
 # 4) 主机侧画面验证（可选，重新生成 out/*.ppm/*.png）
 cd /workspace/nes-band10pro/hostverify
@@ -87,15 +87,15 @@ cargo run --release -- ../roms/nespro-test.nes out
 
 | 产物 | 绝对路径 | sha256 | 说明 |
 | --- | --- | --- | --- |
-| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `b26fa5bb743d710c808519238214f6067fd7e98825872abfaf6d817b9a20e387` | verifier PASS：15 sections、455,416 resident bytes、0 undefined、15,385 relocs、1 ctor / 1 dtor |
-| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.2.canopus` | `2fa42ee0187f7b73b1b9ae61fff91740637af4161fbddd34101f3eb7d542672b` | 497,664 B；`package verify` OK；1 target |
+| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `39b68bc5217c1bea23c88251a22149081013d1afb834be1b519238d2e7418ac8` | verifier PASS：15 sections、455,512 resident bytes、0 undefined、15,385 relocs、1 ctor / 1 dtor |
+| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.3.canopus` | `f480b576c8815c9a23d64258652040378af536da7f4ee9eb3b746133cf7c0714` | 497,664 B；`package verify` OK；1 target |
 | 测试 ROM | `/workspace/nes-band10pro/roms/nespro-test.nes` | 生成脚本可复现 | 16,400 B（16 B header + 16 KiB PRG，CHR RAM） |
 
 ### `.canopus` 包结构（tar）
 
 ```
 artifacts/xiaomi-band-10-pro-3.101.043/module.elf   (680,616 B, sha256 = ELF 的 sha256)
-manifest.json                                       (module_id nespro, version 0.1.2, abi 2, target_pack_revision 8)
+manifest.json                                       (module_id nespro, version 0.1.3, abi 2, target_pack_revision 8)
 receipts/xiaomi-band-10-pro-3.101.043.cmi           (CMI2 receipt, 176 B)
 ```
 
@@ -169,3 +169,16 @@ ROM 放置：`/data/canopus/nespro.nes`（不存在时自动使用内嵌测试 R
 - 页面关闭时写一次 `perf.txt`：`ticks/instr/frames/published/avg_slice_ms/max_slice_ms/session_ms/instr_per_s/budget`。
 
 用这份数据即可判断瓶颈是 6502 吞吐还是 LVGL 重绘，再调 `SLICE_TARGET_MS`、`PUBLISH_MIN_MS`。
+
+
+## 11. 0.1.3：自适应占空比 + 停摆保护
+
+0.1.2 固定 4 ms 片在真机上被观察到“只出第一帧灰屏后不再推进”，说明固定片长在 pump 实际周期变长时会饿死核心。
+
+0.1.3 改为：
+
+- 记录相邻两次回调的墙钟差 `period`（10–200 ms），把 `period × 50%`（3–30 ms）作为本次模拟预算；
+- 指令预算 512–16,384 自适应（超时按 `budget*target/elapsed` 收缩，预算内跑完则翻倍）；
+- `FRAME_PENDING` 超过 3 跳仍未被 UI 消费就丢弃该帧，防止 `ui.post` 丢失导致永久停摆；
+- 发布节流 50 ms、同帧跳过、1:1 显示保持不变；
+- 页面关闭写 `perf.txt`（同 0.1.2 字段）。
