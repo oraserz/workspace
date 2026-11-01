@@ -3,7 +3,7 @@
 - 仓库/分支：`https://github.com/oraserz/workspace.git`，`trae/agent-GbKpGn`
 - vendor：Canopus `4928f1eb`、x-nes `ca4c3955`（本地 symlink 到 `/workspace/.projects/*`，未修改模块管理器源码）
 - 上次执行时间：2026-11-01
-- 当前阶段：0.1.3 = 0.1.2 的自适应占空比版 + 停摆保护，**待用户真机测试**
+- 当前阶段：0.1.4 修复“热循环调用 monotonic_ms 导致预算被压到 512、吞吐仅 18k instr/s”，**待真机复测**
 
 ## 已完成
 
@@ -20,15 +20,19 @@
 - 改为 **10 ms 一跳、每次 ≤4 ms 墙钟时间片**：指令预算 256–4096 自适应（`budget*4/elapsed` 收缩，跑得完则翻倍），一帧跑不完留到下一跳。
 - 发布节流 ≥50 ms；画面不变（FNV 相同）跳过转换/重绘。
 - 页面关闭写一次 `perf.txt`：`ticks/instr/frames/published/avg_slice_ms/max_slice_ms/session_ms/instr_per_s/budget`。
-### 0.1.3（本次）
+### 0.1.3（commit `094d6be`）
 - 真机反馈：0.1.2 只出现灰屏后不推进 → 固定 4 ms 片在 pump 周期变长时饿死核心。
 - 改为按实测 pump 周期分配 50% 时间（3–30 ms）、预算 512–16,384 自适应。
 - `FRAME_PENDING` 超过 3 跳就丢弃，避免 ui.post 丢失导致永久停摆。
-- 版本 0.1.3（version_code 4）；产物 `deliverables/nespro-0.1.3.canopus`（497,664 B，sha256 `f480b576…0714`），ELF sha256 `39b68bc5…8ac8`，`package verify` OK。
+### 0.1.4（本次）
+- 真机 perf：`ticks=519 instr=150520 frames=15 published=3 avg_slice_ms=7 max_slice_ms=16 session_ms=8295 instr_per_s=18145 budget=512`。
+- 根因：每 64 条指令调用一次 `monotonic_ms`，该固件一次时钟查询≈数百条 6502 指令，7 ms 片内只跑了 ~290 条指令，自适应把预算压到 512。
+- 修复：循环内不再查时钟；每个 tick 只测一次耗时，按目标 50% 占空比调整预算（512–16,384）。
+- 版本 0.1.4（version_code 5）；产物 `deliverables/nespro-0.1.4.canopus`（497,664 B，sha256 `fc162566…3734`），ELF sha256 `c32217fc…615d`，`package verify` OK。
 
 ## 未完成 / 待用户测试
 
-1. 真机安装 0.1.3（先 REMOVE 旧版本，或直接用新版本号覆盖）。
+1. 真机安装 0.1.4（先 REMOVE 旧版本，或直接用新版本号覆盖）。
 2. 观察打开/退出是否跟手；帧率是否符合预期。
 3. **把 `/data/canopus/m.nespro/perf.txt` 的内容发回来**，按 `instr_per_s` / `avg_slice_ms` 调 `SLICE_TARGET_MS` 与 `PUBLISH_MIN_MS`。
 4. 超级玛丽：ROM 放到 `/data/canopus/m.nespro/nespro.nes`（或 `supermary.nes`）。

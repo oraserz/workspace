@@ -509,9 +509,12 @@ extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_vo
 
         let emu = &mut *EMU.as_mut_ptr();
         let budget = BUDGET.load(Ordering::Acquire);
+        // Run the whole instruction budget and measure once. Calling
+        // monotonic_ms inside the loop was the real slowdown: on this device a
+        // clock query costs about as much as hundreds of 6502 instructions,
+        // so the per-64-instruction checks dominated every slice.
         let mut executed = 0u32;
         let mut frame_done = false;
-        let mut time_limited = false;
         while executed < budget {
             let _ = emu.tick();
             executed += 1;
@@ -520,13 +523,6 @@ extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_vo
                 frame_done = true;
                 break;
             }
-            if (executed & 63) == 0 {
-                let elapsed = now_ms(c).wrapping_sub(start);
-                if elapsed >= slice_target {
-                    time_limited = true;
-                    break;
-                }
-            }
         }
         INSTRUCTIONS.fetch_add(executed, Ordering::Relaxed);
         let slice_ms = now_ms(c).wrapping_sub(start);
@@ -534,12 +530,15 @@ extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_vo
         if slice_ms > SLICE_MAX_MS.load(Ordering::Relaxed) {
             SLICE_MAX_MS.store(slice_ms, Ordering::Relaxed);
         }
-        if time_limited && slice_ms > 0 {
-            let next = (budget.saturating_mul(slice_target) / slice_ms)
-                .clamp(BUDGET_MIN, BUDGET_MAX);
-            BUDGET.store(next, Ordering::Release);
-        } else if !frame_done && executed >= budget {
-            BUDGET.store(budget.saturating_mul(2).min(BUDGET_MAX), Ordering::Release);
+        if !frame_done {
+            let next = if slice_ms > slice_target {
+                budget.saturating_mul(slice_target) / slice_ms
+            } else if slice_ms.saturating_mul(2) < slice_target {
+                budget.saturating_mul(2)
+            } else {
+                budget
+            };
+            BUDGET.store(next.clamp(BUDGET_MIN, BUDGET_MAX), Ordering::Release);
         }
         if !frame_done {
             return;
@@ -875,8 +874,8 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
         | FLAG_REGISTERS_LAUNCHER_ENTRY
         | FLAG_APP_UNREGISTER_REBOOT_REQUIRED,
     module_id: pack(b"nespro"),
-    module_version: pack(b"0.1.3"),
-    build_id: pack(b"nespro-0.1.3"),
+    module_version: pack(b"0.1.4"),
+    build_id: pack(b"nespro-0.1.4"),
     target_id: pack(env!("CANOPUS_TARGET_ID").as_bytes()),
     prepare: Some(canopus_mod_prepare),
     activate: Some(activate),

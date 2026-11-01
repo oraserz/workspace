@@ -18,13 +18,13 @@
 
 | 交付物 | 路径 | 校验 |
 | --- | --- | --- |
-| 可安装模块包 | `deliverables/nespro-0.1.3.canopus` | 497,664 B；sha256 `f480b576c8815c9a23d64258652040378af536da7f4ee9eb3b746133cf7c0714`；`package verify` → `package OK` |
-| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `39b68bc5217c1bea23c88251a22149081013d1afb834be1b519238d2e7418ac8`；`PASS (15 sections, 455512 resident bytes, 0 undefined, 15385 relocs, 1 ctors, 1 dtors)` |
+| 可安装模块包 | `deliverables/nespro-0.1.4.canopus` | 497,664 B；sha256 `fc162566a75cf5d8255a1200ce17390d319744be398ae47dbbd1765b09233734`；`package verify` → `package OK` |
+| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `c32217fc7ff5a8b18e6cbaeeb3201cd0016acd49d60fa6822dc8e1ff0d3f615d`；`PASS (15 sections, 455456 resident bytes, 0 undefined, 15384 relocs, 1 ctors, 1 dtors)` |
 | Launcher 安装器 | `deliverables/nespro-installer-xiaomi-band-10-pro/`、`.zip` | 含新 ELF/CMI |
 | 自产测试 ROM | `roms/nespro-test.nes` | NROM-128 / mapper 0 / CHR RAM |
 | 期望画面脚本 | `/workspace/verify/nespro/make_expected.py` | 输出 256×240 / 336×315 / 整页 PNG，13 色 |
 
-**版本号提升到 0.1.3**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。
+**版本号提升到 0.1.4**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。
 
 ## 3. 卡死根因（已修复）
 
@@ -32,14 +32,14 @@
 
 修复：`emulator_init_in_place` 原地零初始化；`cart::Cart` 用 `Vec` 承载 PRG/CHR；UI 回调不再有大栈帧。
 
-## 4. 卡顿根因与本次结构调整（0.1.3 自适应时间片）
+## 4. 卡顿根因与本次结构调整（0.1.4 去掉热循环里的时钟调用）
 
 真机反馈：不是死机，内存也没爆，手机仍能请求打开应用，只是 **UI 响应慢**；息屏再亮屏后能正常退出 → 负担全在 LVGL/UI 线程。
 
 本次改为「模拟器离开 UI 线程」：
 
 1. `page_on_create` 只创建控件，立即返回；ROM 加载和首帧不再同步执行。
-2. 用 **Supervisor time-service 定时器** 驱动 6502 模拟，但该 pump 实际是 UI owner 上的 LVGL 定时器：改为 10 ms 跳；每跳按**实测 pump 周期**分配 50% 时间给模拟（3–30 ms），指令预算 512–16,384 自适应，跑不完留到下一跳；UI 若 3 跳仍未消费帧则丢弃，避免永久停摆。
+2. 用 **Supervisor time-service 定时器** 驱动 6502 模拟，但该 pump 实际是 UI owner 上的 LVGL 定时器：10 ms 一跳，按实测 pump 周期分配 50% 时间（3–30 ms）；**循环内不再查时钟**，每个 tick 只测一次耗时，指令预算 512–16,384 自适应；UI 3 跳未消费帧则丢弃。
 3. 帧完成后用 `ctx->ui->post` 回到 UI 任务，只做 `convert_frame` + `lvx_image_set_src`；`FRAME_PENDING` 保证 UI 转换时模拟器暂停，避免读到半帧。
 4. 帧内容用 FNV 校验和比较，且发布间隔 ≥50 ms：画面不变或节流窗口内不转换、不重绘。
 5. `on_pause` 停止定时器、`on_resume` 重启；`on_destroy` 停止并销毁。
@@ -81,3 +81,14 @@ ticks=<次数> instr=<指令数> frames=<完成帧> published=<发布帧> avg_sl
 2. 模拟器 flash journal 不可靠地承载 `registry.tmp→registry.bin` 的 rename（验证表盘才用 `os.remove`；真机 rename 原子）。
 3. 仅 NROM/UxROM/CNROM；更大 ROM 受 128 KiB 模块堆限制。
 4. 音频/按键/存档未实现。
+
+
+## 8. 真机数据（0.1.3）
+
+```
+ticks=519 instr=150520 frames=15 published=3
+avg_slice_ms=7 max_slice_ms=16 session_ms=8295
+instr_per_s=18145 budget=512
+```
+
+每个 tick 只跑约 290 条指令却耗时 7 ms，说明**每 64 条指令查一次 `monotonic_ms` 的开销主导了时间片**（一次时钟查询约等于数百条 6502 指令），自适应因此把预算压到最小值 512。0.1.4 删除循环内时钟查询后，一次 tick 只测一次时间，预算不会再被时钟开销拖死。
