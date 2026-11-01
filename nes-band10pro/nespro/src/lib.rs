@@ -1,10 +1,10 @@
 //! nespro — NES emulator display module for Xiaomi Band 10 Pro (043).
 //!
 //! The module registers a native launcher application. When its page is created
-//! it loads a ROM (or the embedded NROM test ROM), runs the `x-nes` core on a
-//! page-owned LVGL timer, converts each 256x240 palette-indexed frame to
-//! RGB565, and refreshes a target-bound `lv_image` widget backed by a module
-//! `lv_image_dsc_t`.
+//! it builds the widgets and starts a Supervisor time-service timer. That timer
+//! runs the `x-nes` core off the LVGL task; each completed frame is converted to
+//! RGB565 and the `lv_image` source is swapped from a `ui.post` callback, so the
+//! UI thread only ever does the blit and never the 6502 emulation.
 //!
 //! Evidence level: compiled and ELF-verified only. The firmware-private LVGL
 //! entry points used here are STATIC_RECOVERED, not device-verified.
@@ -21,13 +21,12 @@ use canopus_abi::*;
 use canopus_runtime::{mem, status_put_u32, status_writer_publish};
 use canopus_target_private::{activity_navigate, lvx_content_create, lvx_image_create,
     lvx_image_set_scale, lvx_image_set_src, lvx_object_align, lvx_object_set_size,
-    lvx_timer_create, lvx_timer_delete, ALIGN_TOP_MID, CONTENT_HEIGHT, CONTENT_TOP_OFFSET,
-    CONTENT_WIDTH};
+    ALIGN_TOP_MID, CONTENT_HEIGHT, CONTENT_TOP_OFFSET, CONTENT_WIDTH};
 use core::alloc::{GlobalAlloc, Layout};
 use core::ffi::{c_char, c_void};
 use core::mem::MaybeUninit;
 use core::ptr::{null, null_mut};
-use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicPtr, AtomicU32, AtomicU8, Ordering};
 use nes::cpu::CpuRp2a03;
 use nes::mapper::Mapper;
 use nes::rom::Rom;
@@ -35,11 +34,14 @@ use nes::{reset, Emulator};
 use nes_frame::{NES_HEIGHT, NES_PIXELS, NES_WIDTH, convert_frame};
 
 const MAGIC: u32 = 0x4E455350; // "NESP"
-const ROM_PATH: &[u8] = b"/data/canopus/nespro.nes\0";
-const TIMER_PERIOD_MS: u32 = 33;
-/// Upper bound of instructions executed per UI timer tick (~one NES frame is
-/// ~30k cycles, so this cap only matters when a ROM never finishes a frame).
-const INSTRUCTION_BUDGET: u32 = 40_000;
+/// Time-service tick: 20 UI updates per second, well below the panel rate.
+const TIMER_PERIOD_MS: u32 = 50;
+/// Emulated frames per tick, so a 60 Hz game still advances at real speed
+/// (3 x 20 Hz) while the display only repaints 20 times a second.
+const FRAMES_PER_TICK: usize = 3;
+/// Instruction budget per tick; three NES frames are roughly 30k-45k
+/// instructions, and the whole budget runs off the LVGL task.
+const INSTRUCTION_BUDGET: u32 = 60_000;
 
 // ---------------------------------------------------------------------------
 // Context + allocator
@@ -211,7 +213,17 @@ static mut DSC: [LvImageDsc; 2] = [DSC_ZERO, DSC_ZERO];
 static mut FB: [u16; NES_PIXELS] = [0; NES_PIXELS];
 static DSC_INDEX: AtomicU8 = AtomicU8::new(0);
 static IMAGE: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
-static TIMER: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
+/// Supervisor time-service timer id (`-1` when none exists).
+static RUN_TIMER: AtomicI32 = AtomicI32::new(-1);
+/// `1` while the page is foreground; paused pages do not run the emulator.
+static PAGE_ACTIVE: AtomicU8 = AtomicU8::new(0);
+/// `1` when a converted frame waits for the UI task to swap the image source.
+static FRAME_PENDING: AtomicU8 = AtomicU8::new(0);
+/// Checksum of the last queued frame; identical frames skip conversion and
+/// the LVGL redraw entirely.
+static LAST_FRAME_HASH: AtomicU32 = AtomicU32::new(0);
+/// `0` until the first frame has been queued (so a hash of zero still draws).
+static HAS_FRAME: AtomicU8 = AtomicU8::new(0);
 
 // ---------------------------------------------------------------------------
 // Emulator state
@@ -256,32 +268,41 @@ unsafe fn log_info(c: *const ContextV1, message: &'static [u8]) {
 // ROM loading
 // ---------------------------------------------------------------------------
 
+/// Names tried inside the module's private directory, in order. The FS service
+/// resolves relative names to `/data/canopus/m.nespro/`; absolute paths under
+/// `/data/canopus` are refused by the Supervisor.
+const ROM_NAMES: [&[u8]; 3] = [b"nespro.nes\0", b"supermary.nes\0", b"rom.nes\0"];
+
 unsafe fn read_rom_from_fs(c: *const ContextV1) -> Option<Vec<u8>> {
     if !unsafe { services_has(c, SVC_FS, 1) } {
         return None;
     }
     let ctx_ref = unsafe { (c as *const CanopusContext).as_ref() }?;
     let fs = unsafe { ctx_ref.fs.as_ref() }?;
-    let path = ROM_PATH.as_ptr() as *const c_char;
     let mut stat = CanopusFsStat {
         size: 0,
         is_dir: 0,
         _pad: [0; 3],
         mtime: 0,
     };
-    if unsafe { (fs.exists)(c, path) } <= 0 {
-        return None;
+    for name in ROM_NAMES {
+        let path = name.as_ptr() as *const c_char;
+        if unsafe { (fs.exists)(c, path) } <= 0 {
+            continue;
+        }
+        if unsafe { (fs.stat)(c, path, &mut stat) } != 0 || stat.size == 0 {
+            continue;
+        }
+        let mut buf: Vec<u8> = alloc::vec![0u8; stat.size as usize];
+        let read =
+            unsafe { (fs.read_all)(c, path, buf.as_mut_ptr() as *mut c_void, stat.size) };
+        if read <= 0 {
+            continue;
+        }
+        buf.truncate(read as usize);
+        return Some(buf);
     }
-    if unsafe { (fs.stat)(c, path, &mut stat) } != 0 || stat.size == 0 {
-        return None;
-    }
-    let mut buf: Vec<u8> = alloc::vec![0u8; stat.size as usize];
-    let read = unsafe { (fs.read_all)(c, path, buf.as_mut_ptr() as *mut c_void, stat.size) };
-    if read <= 0 {
-        return None;
-    }
-    buf.truncate(read as usize);
-    Some(buf)
+    None
 }
 
 /// Initialises a 76 KiB `Emulator` in place instead of on the current stack.
@@ -348,31 +369,160 @@ fn init_dsc() {
     }
 }
 
-extern "C" fn frame_timer(_timer: *mut c_void) {
+/// Checksum of the palette-index frame: unchanged screens never reach
+/// `convert_frame` or the LVGL redraw.
+unsafe fn frame_hash(frame: &[u8; NES_PIXELS]) -> u32 {
+    let mut hash = 0x811C_9DC5u32;
+    for &byte in frame {
+        hash = (hash ^ byte as u32).wrapping_mul(0x0100_0193);
+    }
+    hash
+}
+
+/// Loads the ROM from the module's private directory and boots the emulator.
+/// Runs on the Supervisor timer task, never on the LVGL task.
+unsafe fn ensure_emulator(c: *const ContextV1) -> bool {
+    let rom = read_rom_from_fs(c);
+    let started = match rom.as_deref() {
+        Some(bytes) => {
+            log_info(c, b"nespro rom nespro.nes\0");
+            if start_emulator(bytes) {
+                true
+            } else {
+                log_info(c, b"nespro rom unsupported, builtin test rom\0");
+                start_emulator(TEST_ROM)
+            }
+        }
+        None => {
+            log_info(c, b"nespro rom builtin test rom\0");
+            start_emulator(TEST_ROM)
+        }
+    };
+    if !started {
+        log_info(c, b"nespro start failed\0");
+    }
+    started
+}
+
+/// Supervisor timer-tick: emulate, then hand the finished frame to the UI task.
+/// `FRAME_PENDING` pauses the core until the UI swapped the image source, so
+/// the UI never converts a half-written frame buffer.
+extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_void) {
+    if PAGE_ACTIVE.load(Ordering::Acquire) == 0 {
+        return;
+    }
     unsafe {
         if !EMU_READY {
+            if !ensure_emulator(c) {
+                return;
+            }
+            EMU_READY = true;
+            FRAME_PENDING.store(0, Ordering::Release);
+        }
+        if FRAME_PENDING.load(Ordering::Acquire) != 0 {
             return;
         }
         let emu = &mut *EMU.as_mut_ptr();
         let mut budget = INSTRUCTION_BUDGET;
-        while !emu.bus.ppu.frame_complete && budget > 0 {
-            let _ = emu.tick();
-            budget -= 1;
+        let mut frames = 0usize;
+        while frames < FRAMES_PER_TICK && budget > 0 {
+            while !emu.bus.ppu.frame_complete && budget > 0 {
+                let _ = emu.tick();
+                budget -= 1;
+            }
+            if !emu.bus.ppu.frame_complete {
+                break;
+            }
+            emu.bus.ppu.frame_complete = false;
+            frames += 1;
         }
-        emu.bus.ppu.frame_complete = false;
-        convert_frame(&emu.bus.ppu.frame, &mut FB);
-        if FIRST_FRAME_LOGGED.swap(1, Ordering::Relaxed) == 0 {
-            log_info(ctx(), b"nespro first frame\0");
-        }
-
-        let image = IMAGE.load(Ordering::Acquire);
-        if image.is_null() {
+        if frames == 0 {
             return;
         }
+        let hash = frame_hash(&emu.bus.ppu.frame);
+        if HAS_FRAME.load(Ordering::Acquire) != 0
+            && hash == LAST_FRAME_HASH.load(Ordering::Acquire)
+        {
+            return;
+        }
+        LAST_FRAME_HASH.store(hash, Ordering::Release);
+        HAS_FRAME.store(1, Ordering::Release);
+        FRAME_PENDING.store(1, Ordering::Release);
+        let Some(ctx_ref) = ((c as *const CanopusContext).as_ref()) else {
+            FRAME_PENDING.store(0, Ordering::Release);
+            return;
+        };
+        let Some(ui) = ctx_ref.ui.as_ref() else {
+            publish_frame(c, null_mut());
+            return;
+        };
+        if (ui.post)(c, publish_frame, null_mut()) < 0 {
+            publish_frame(c, null_mut());
+        }
+    }
+}
+
+/// UI-task half of a frame: convert the indices, then swap the image source.
+extern "C" fn publish_frame(c: *const ContextV1, _data: *mut c_void) {
+    unsafe {
+        let image = IMAGE.load(Ordering::Acquire);
+        if image.is_null() || !EMU_READY {
+            FRAME_PENDING.store(0, Ordering::Release);
+            return;
+        }
+        let emu = &mut *EMU.as_mut_ptr();
+        convert_frame(&emu.bus.ppu.frame, &mut FB);
         let next = 1 - DSC_INDEX.load(Ordering::Relaxed);
         DSC_INDEX.store(next, Ordering::Relaxed);
         let dsc = &DSC[next as usize] as *const LvImageDsc as *const c_void;
         lvx_image_set_src(image, dsc);
+        FRAME_PENDING.store(0, Ordering::Release);
+        if FIRST_FRAME_LOGGED.swap(1, Ordering::Relaxed) == 0 {
+            log_info(c, b"nespro first frame\0");
+        }
+    }
+}
+
+/// Creates (first call) and starts the Supervisor timer-service pump.
+unsafe fn start_runtime(c: *const ContextV1) {
+    if !unsafe { services_has(c, SVC_TIME, 1) } {
+        log_info(c, b"nespro time service unavailable\0");
+        return;
+    }
+    let Some(ctx_ref) = (unsafe { (c as *const CanopusContext).as_ref() }) else {
+        return;
+    };
+    let Some(time) = (unsafe { ctx_ref.time.as_ref() }) else {
+        return;
+    };
+    let mut id = RUN_TIMER.load(Ordering::Acquire);
+    if id < 0 {
+        id = unsafe { (time.timer_create)(c, TIMER_PERIOD_MS, 1, runtime_tick, null_mut()) };
+        if id < 0 {
+            log_info(c, b"nespro timer create failed\0");
+            return;
+        }
+        RUN_TIMER.store(id, Ordering::Release);
+    }
+    let _ = unsafe { (time.timer_start)(c, id) };
+}
+
+/// Stops the pump; `destroy` releases the timer id as well.
+unsafe fn stop_runtime(c: *const ContextV1, destroy: bool) {
+    let id = RUN_TIMER.load(Ordering::Acquire);
+    if id < 0 {
+        return;
+    }
+    let Some(ctx_ref) = (unsafe { (c as *const CanopusContext).as_ref() }) else {
+        return;
+    };
+    let Some(time) = (unsafe { ctx_ref.time.as_ref() }) else {
+        return;
+    };
+    let _ = unsafe { (time.timer_stop)(c, id) };
+    if destroy {
+        let _ = unsafe { (time.timer_destroy)(c, id) };
+        RUN_TIMER.store(-1, Ordering::Release);
     }
 }
 
@@ -408,8 +558,10 @@ extern "C" fn page_on_create(
         }
         init_dsc();
         lvx_image_set_src(image, &DSC[0] as *const LvImageDsc as *const c_void);
-        // 336/256 = 1.3125 -> a 336x315 picture inside the 336x424 content area.
-        lvx_image_set_scale(image, CONTENT_WIDTH, CONTENT_WIDTH);
+        // 1:1 pixels. Scaling to 336 wide was the bulk of the per-frame UI cost
+        // and the source of the few-pixel edge offset; the image is centred
+        // inside the 336-wide content area instead.
+        lvx_image_set_scale(image, NES_WIDTH as i32, NES_WIDTH as i32);
         lvx_object_align(image, ALIGN_TOP_MID, 0, 0);
         IMAGE.store(image, Ordering::Release);
 
@@ -420,51 +572,39 @@ extern "C" fn page_on_create(
         } else {
             log_info(c, b"display resolution differs from 336x480\0");
         }
-        let rom = read_rom_from_fs(c);
-        let started = match rom.as_deref() {
-            Some(bytes) => {
-                log_info(c, b"nespro rom /data/canopus/nespro.nes\0");
-                if start_emulator(bytes) {
-                    true
-                } else {
-                    log_info(c, b"nespro rom unsupported, builtin test rom\0");
-                    start_emulator(TEST_ROM)
-                }
-            }
-            None => {
-                log_info(c, b"nespro rom builtin test rom\0");
-                start_emulator(TEST_ROM)
-            }
-        };
-        if !started {
-            log_info(c, b"nespro start failed\0");
-            return -1;
-        }
-        // Draw the first frame immediately so the page is never blank.
-        frame_timer(null_mut());
-
-        let timer = lvx_timer_create(frame_timer, TIMER_PERIOD_MS, null_mut());
-        TIMER.store(timer, Ordering::Release);
+        // The page opens with an empty image; the timer task loads the ROM and
+        // draws the first frame off the UI thread.
+        PAGE_ACTIVE.store(1, Ordering::Release);
+        start_runtime(c);
     }
     0
 }
 
 extern "C" fn page_on_resume(_page: *mut PageDescriptor) -> i32 {
+    unsafe {
+        PAGE_ACTIVE.store(1, Ordering::Release);
+        start_runtime(ctx());
+    }
     0
 }
 
 extern "C" fn page_on_pause(_page: *mut PageDescriptor) -> i32 {
+    unsafe {
+        PAGE_ACTIVE.store(0, Ordering::Release);
+        stop_runtime(ctx(), false);
+    }
     0
 }
 
 extern "C" fn page_on_destroy(_page: *mut PageDescriptor) -> i32 {
     unsafe {
-        let timer = TIMER.swap(null_mut(), Ordering::AcqRel);
-        if !timer.is_null() {
-            lvx_timer_delete(timer);
-        }
+        PAGE_ACTIVE.store(0, Ordering::Release);
+        stop_runtime(ctx(), true);
         IMAGE.store(null_mut(), Ordering::Release);
+        FRAME_PENDING.store(0, Ordering::Release);
         EMU_READY = false;
+        DSC_INDEX.store(0, Ordering::Release);
+        HAS_FRAME.store(0, Ordering::Release);
     }
     0
 }
@@ -480,9 +620,14 @@ pub extern "C" fn canopus_mod_prepare(c: *const ContextV1) -> i32 {
 }
 
 #[no_mangle]
-pub extern "C" fn canopus_mod_stop(_c: *const ContextV1) -> i32 {
+pub extern "C" fn canopus_mod_stop(c: *const ContextV1) -> i32 {
     unsafe {
+        PAGE_ACTIVE.store(0, Ordering::Release);
+        stop_runtime(c, true);
         EMU_READY = false;
+        FRAME_PENDING.store(0, Ordering::Release);
+        HAS_FRAME.store(0, Ordering::Release);
+        IMAGE.store(null_mut(), Ordering::Release);
     }
     CTX.store(null_mut(), Ordering::Release);
     0
@@ -603,8 +748,8 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
         | FLAG_REGISTERS_LAUNCHER_ENTRY
         | FLAG_APP_UNREGISTER_REBOOT_REQUIRED,
     module_id: pack(b"nespro"),
-    module_version: pack(b"0.1.0"),
-    build_id: pack(b"nespro-0.1.0"),
+    module_version: pack(b"0.1.1"),
+    build_id: pack(b"nespro-0.1.1"),
     target_id: pack(env!("CANOPUS_TARGET_ID").as_bytes()),
     prepare: Some(canopus_mod_prepare),
     activate: Some(activate),

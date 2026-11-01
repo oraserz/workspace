@@ -2,98 +2,72 @@
 
 - 执行日期：2026-11-01
 - 仓库/分支：`https://github.com/oraserz/workspace.git`，`trae/agent-GbKpGn`
-- 验证环境：本仓库的 QEMU `bes1503` 模型 + 真实固件 043（`models/band10pro`），VNC 截图见 `/workspace/verify/nespro/`
-- 约束：未修改 Canopus 模块管理器源码（`vendor/*` 仅为指向 `/workspace/.projects/*` 的符号链接，未提交改动）；未向 QEMU 仓库提交任何内容
+- 约束：未修改 Canopus 模块管理器源码；未向 QEMU 仓库提交任何内容
 
 ## 1. 结论
 
 | 验收项 | 状态 | 证据等级 |
 | --- | --- | --- |
 | 启用模块后不再卡死 | 达成 | **模拟器实机验证**（真实固件 043） |
-| 应用入口出现在 launcher，可打开 | 达成 | **模拟器实机验证**（应用列表最底部，罗盘图标） |
-| 页面创建并显示 NES 画面 | 达成 | **模拟器实机验证**（多色棋盘帧，持续刷新） |
-| 页面可退出（右滑） | 达成 | **模拟器实机验证** |
-| 构建可复现、包结构可校验 | 达成 | 编译/包校验 |
-
-说明：模拟器验证属于本项目内部的 host/emulator 级证据；物理真机尚未复测。
+| launcher 入口可打开、可右滑退出 | 达成 | **模拟器实机验证** |
+| 页面显示 NES 画面 | 达成 | **模拟器实机验证**（内嵌 NROM 测试 ROM） |
+| UI 线程不再承担模拟/转换 | 已改为定时器任务 + `ui.post` | 编译 + 静态审查，**真机待测** |
+| 真机卡顿（响应慢） | 已针对 UI 线程负载做结构性修改 | **真机待测**（用户自测） |
 
 ## 2. 交付物
 
 | 交付物 | 路径 | 校验 |
 | --- | --- | --- |
-| 可安装模块包 | `deliverables/nespro-0.1.0.canopus` | 487,424 B；sha256 `2b129e1dca3bbb57bb794f1bb7bf9c5bc6814e4a5110eec365a41897c9ae1510`；`canopus package verify` → `package OK` |
-| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `2f1c201e41d153d601eda90848fefc26a8fb591e53b65a5b3141ab7940b4a76a`；`PASS (15 sections, 451241 resident bytes, 0 undefined, 15270 relocs, 1 ctors, 1 dtors)` |
-| Launcher 安装器 | `deliverables/nespro-installer-xiaomi-band-10-pro/`、`.zip` | 内含新 ELF/CMI 与 `canopus package --installer` 生成的 `main.lua` |
-| 自产测试 ROM | `roms/nespro-test.nes` | NROM-128 / mapper 0 / CHR RAM；4 色板 × 棋盘/纯色 tile |
-| 验证截图 | `/workspace/verify/nespro/*.png` | `final_nes_page.png`（NES 画面）、`final_exit.png`（右滑退出后回到表盘） |
+| 可安装模块包 | `deliverables/nespro-0.1.1.canopus` | 489,472 B；sha256 `b5f30bccd9233d57268db97985ef981c49e46905f41672b4ae2b86e4184651ad`；`package verify` → `package OK` |
+| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `b3ab0399889cb762734fd82ebed8a799d7b12c63a69d22db09a60350a7c3589f`；`PASS (15 sections, 451976 resident bytes, 0 undefined, 15292 relocs, 1 ctors, 1 dtors)` |
+| Launcher 安装器 | `deliverables/nespro-installer-xiaomi-band-10-pro/`、`.zip` | 含新 ELF/CMI |
+| 自产测试 ROM | `roms/nespro-test.nes` | NROM-128 / mapper 0 / CHR RAM |
+| 期望画面脚本 | `/workspace/verify/nespro/make_expected.py` | 输出 256×240 / 336×315 / 整页 PNG，13 色 |
 
-`analysis/mi8/out/` 是资源解包产物，仅供本地分析，不属于交付物。
+**版本号提升到 0.1.1**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。
 
-## 3. 复现构建
+## 3. 卡死根因（已修复）
 
-```bash
-export CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus
-python3 tools/make_test_rom.py roms/nespro-test.nes
-cd nespro
-canopus build                 # → build/xiaomi-band-10-pro-3.101.043/nespro.elf
-canopus package --build       # → dist/nespro-0.1.0.canopus
-canopus package verify dist/nespro-0.1.0.canopus
-```
+`page_on_create` 在固件 UI 任务（栈只有几 KiB）上按值构造 `Emulator`（76,288 B）、`Mapper::from_ines`（48 KiB）和 `Nrom::new`（40 KiB），叠加后栈溢出，启用即卡死。
 
-## 4. 卡死根因与修复
+修复：`emulator_init_in_place` 原地零初始化；`cart::Cart` 用 `Vec` 承载 PRG/CHR；UI 回调不再有大栈帧。
 
-`page_on_create` 运行在固件 UI 任务上，栈只有几 KiB。原实现：
+## 4. 卡顿根因与本次结构调整
 
-- `Emulator::new(...)` 按值返回 76,288 B；
-- `Mapper::from_ines` 内联构建 48 KiB 结构；
-- `Nrom::new` 另需 40 KiB。
+真机反馈：不是死机，内存也没爆，手机仍能请求打开应用，只是 **UI 响应慢**；息屏再亮屏后能正常退出 → 负担全在 LVGL/UI 线程。
 
-三者叠加导致 UI 任务栈溢出 → 启用模块即卡死/页面无法打开。
+本次改为「模拟器离开 UI 线程」：
 
-修复（`nespro/src/lib.rs`）：
+1. `page_on_create` 只创建控件，立即返回；ROM 加载和首帧不再同步执行。
+2. 用 **Supervisor time-service 定时器**（`ctx->time->timer_create`，运行在 timer pump 任务，而非 LVGL 任务）驱动 6502 模拟：50 ms 跳、每跳最多 3 帧、总预算 60,000 条指令，游戏速度仍接近 60 Hz。
+3. 帧完成后用 `ctx->ui->post` 回到 UI 任务，只做 `convert_frame` + `lvx_image_set_src`；`FRAME_PENDING` 保证 UI 转换时模拟器暂停，避免读到半帧。
+4. 帧内容用 FNV 校验和比较：画面不变就不转换、不重绘（静态场景 UI 负载≈0）。
+5. `on_pause` 停止定时器、`on_resume` 重启；`on_destroy` 停止并销毁。
+6. **取消 1.3125× 放大**，按 256×240 原始尺寸显示：既去掉真机上观察到的几像素边缘偏移，也砍掉最大的每帧 UI 开销。
 
-1. `emulator_init_in_place`：对 `MaybeUninit<Emulator>` 先 `write_bytes(0)`，再用裸指针逐字段写入（`mapper`、`ppu.odd_frame`、`apu` 采样率、`CpuRp2a03::new(0)`），最后 `reset()`；不再按值构造。
-2. `nespro/src/cart.rs`：自建 `Cart`，用 `Vec<u8>` 持有 PRG/CHR，只把两份指针移入 `Mapper`，规避 40/48 KiB 栈帧。
-3. 页面仍保留：内容容器、`lv_image`、`lv_image_dsc_t`、33 ms LVGL 定时器；首帧在 `page_on_create` 内立即绘制，避免空白页。
+## 5. 运行 ROM（超级玛丽）
 
-## 5. 模拟器实机验证（QEMU + 固件 043）
-
-验证表盘（lua，放在 `/data`，不属于模块交付物）经 `/dev/canopus` 依次执行：`insmod` → `INSTALL` → `ENABLE` → `ACTIVATE` → `NATIVE_STAGE 1/2`。UART 原样输出：
+模块只从**自己的私有目录**读 ROM（Supervisor 禁止模块用绝对路径访问 `/data/canopus`）。文件名依次尝试：
 
 ```
-[nespro-verify] verification watchface started
-[nespro-verify] removed registry.bin ok=true
-[nespro-verify] supervisor loaded
-[nespro-verify] step 1 ok: 加载 Canopus 运行环境
-[nespro-verify] step 2 ok: 安装 nespro 模块
-[nespro-verify] step 3 ok: 启用模块（写入启动意图）
-[nespro-verify] after activate: id=nespro state=9 version=1 flags=0 activation=0 modules=1 safe=0 error=0
-[nespro-verify] step 4 ok: 激活模块并加载镜像
-[nespro-verify] step 5 ok: 注册 NES 应用入口
-[nespro-verify] step 6 ok: 打开 NES 应用页面
+/data/canopus/m.nespro/nespro.nes
+/data/canopus/m.nespro/supermary.nes
+/data/canopus/m.nespro/rom.nes
 ```
 
-`state=9` 即 `CANOPUS_STATE_ACTIVE`：模块已加载并激活，未出现卡死或重启。
+都不存在时回退到内嵌的自产 NROM 测试 ROM。支持 NROM（mapper 0，含 32 KB 版本）、UxROM（2）、CNROM（3）；SMB 属于 NROM，可直接运行。
 
-模块侧探针（验证用临时构建，最终包已移除，避免每 2 s 写 flash 的磨损）：
+> 仓库不内置商业 ROM（版权原因），需要用户自行放入上述私有目录。
 
-- `trace.stage1.id = 204`：`launcher.register_app` 返回的 app id；
-- `trace.create` / `trace.resume` / `trace.frame`：页面创建、恢复、首帧绘制均执行；
-- `trace.frames`：帧计数在该页面打开期间由 60 递增到 120，说明 33 ms 定时器持续运行；
-- `trace.goto.ui rc = 0`：stage-2 通过 `ctx->ui->post` 在 UI 任务上调用 `page_goto` 成功。
+## 6. 模拟器实机验证（0.1.0 表现，0.1.1 同代码路径）
 
-画面：`/workspace/verify/nespro/final_nes_page.png` 为内嵌测试 ROM 的 4 组调色板棋盘（256×240 → RGB565 → 336 宽缩放，下方黑边为页面剩余区域）；`final_exit.png` 为右滑退出后回到表盘。
+- lua 验证表盘 6/6 步通过，`state=9 (ACTIVE)`，无卡死/重启。
+- launcher 应用列表最底部出现 NES 入口，点击后显示测试 ROM 的多色棋盘；右滑退出。
+- 截图：`deliverables/verify/nespro-page.png`、`nespro-exit.png`，完整序列在 `/workspace/verify/nespro/`。
 
-## 6. 已知问题与限制
+## 7. 已知限制
 
-1. **模拟器 registry 限制**：`sup_registry_persist` 使用 tmp+rename，模拟器 flash journal 不保证 rename，`registry.bin` 常为 0 字节。验证表盘在启动前 `os.remove("/data/canopus/registry.bin")`；**仅模拟器需要**，真机 rename 原子。
-2. **stage-2 自动导航**：调用成功且页面被创建，但 lua 验证表盘在随后仍操作 UI，页面会被系统回收；可靠入口是 launcher 图标（应用列表最底部）。真实表盘环境下可能表现不同，需真机复核。
-3. **ROM 体积**：保留 NROM/UxROM/CNROM；受 128 KiB 模块堆限制，大 ROM 不支持。
-4. **音频/按键/存档**：未实现。
-5. **包签名**：receipt 为未签名 CMI2。
-
-## 7. 下一步
-
-1. 物理真机安装 `deliverables/nespro-0.1.0.canopus` 复核（真机 rename/调度与模拟器略有差异）。
-2. 放入 `/data/canopus/nespro.nes` 验证 ROM 文件加载路径。
-3. 如需“启用即自动进入页面”，在真实表盘环境复测 stage-2；或改由模块自有 LVGL 定时器延后调用。
+1. 0.1.1 的 UI 线程改造**尚未在真机复测**（本轮按用户要求不做设备验证）。
+2. 模拟器 flash journal 不可靠地承载 `registry.tmp→registry.bin` 的 rename（验证表盘才用 `os.remove`；真机 rename 原子）。
+3. 仅 NROM/UxROM/CNROM；更大 ROM 受 128 KiB 模块堆限制。
+4. 音频/按键/存档未实现。
