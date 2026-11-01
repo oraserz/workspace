@@ -1,21 +1,22 @@
 # STATE
 
-- 依据的基址 commit：`5df98ba6d1a8c5351b289e878e29c1c30f21d524`（vendor：Canopus `4928f1eb70594263292c32ffc531a7cad3aea555`，x-nes `ca4c3955b8a442fe25ee62abd57fca6849d1e70b`）
-- 上次执行时间：2026-10-27 12:50 CST
-- 当前阶段：兜底与最终交付（`04-catchup`）已完成，进入设备验证等待
+- 依据的基址 commit：`97b12c3`（`https://github.com/oraserz/workspace.git`，分支 `trae/agent-GbKpGn`）
+- vendor：Canopus、x-nes 以符号链接指向 `/workspace/.projects/*`（未修改模块管理器源码）
+- 上次执行时间：2026-11-01
+- 当前阶段：**模块缺陷修复 + QEMU 实机验证已完成**，产物已可交付
 - 已完成：
-  - `nespro` 模块接入 x-nes，`canopus build` 通过 ELF verifier（15 sections / 515,869 resident / 0 undefined / 1 ctor）；`canopus clean` 后重建 sha256 完全一致（可复现）
-  - `.canopus` 包已产出并通过 `canopus package verify`（1 target，685,056 B，重建后 sha256 一致）
-  - 主机侧画面验证完成：4 帧 / 37,632 指令，`frame-04` 13 色，`content-424` 336×424 布局预览
-  - 自产 16 KiB NROM 测试 ROM（`roms/nespro-test.nes`）
-  - 文档：`docs/01-research.md`、`docs/DECISION.md`、`docs/02-implementation.md`、`REPORT.md`
-  - 运行时 `display->get_resolution` 校验；内存峰值优化（`drop(rom)`）；x-nes vendor 编译补丁
-- 未完成：
-  - 真机安装、页面注册、LVGL 上屏、帧率与栈/堆实测（设备未验证）
-  - 音频、按键、存档（明确超出本轮）
-  - 大于约 24 KiB 的 ROM、真双缓冲/局部刷新
-- 阻塞原因：设备（小米手环 10 Pro，固件 043）不在执行环境内，无法做设备验证；本轮不要求 qemu/Mirage
+  - **卡死根因修复**：`page_on_create` 链路原本按值构造 `Emulator`（76,288 B）+ `Mapper::from_ines`（48 KiB）+ `Nrom::new`（40 KiB），超出固件 UI 任务栈导致栈破坏/卡死。改为「原地零初始化 Emulator」+「Vec 承载 PRG/CHR 的 `cart::Cart`」，页面回调不再出现大栈帧（反汇编复核 < 512 B）
+  - 最终构建：ELF sha256 `2f1c201e41d153d601eda90848fefc26a8fb591e53b65a5b3141ab7940b4a76a`，verifier `PASS (15 sections, 451,241 resident bytes, 0 undefined, 15,270 relocs, 1 ctors, 1 dtors)`
+  - `.canopus` 包：487,424 B，sha256 `2b129e1dca3bbb57bb794f1bb7bf9c5bc6814e4a5110eec365a41897c9ae1510`，`canopus package verify` → `package OK`
+  - **QEMU（真实固件 043）实机验证**通过：lua 验证表盘 6/6 步完成，`id=nespro state=9(ACTIVE) version=1 activation=0 modules=1 safe=0 error=0`，无卡死、无重启
+  - Launcher 出现 NES 入口（应用列表最底部，罗盘图标）；点击后页面创建并持续渲染内嵌 NROM 测试 ROM 的多色棋盘画面；**右滑可退出**回到表盘
+  - 探针证据（验证用临时构建，未随最终包发布）：`trace.stage1.id=204`、`trace.create/resume/frame`、`trace.frames` 60→120 持续递增、`trace.goto.ui rc=0`
+  - 截图（工作区内）：`/workspace/verify/nespro/`（关键帧：`final_nes_page.png`、`final_exit.png`）
+  - 交付物已更新：`deliverables/nespro-0.1.0.canopus`、`deliverables/nespro-installer-xiaomi-band-10-pro/`（.bin/.cmi/.zip）
+- 已知限制：
+  - 模拟器 flash journal 不保证 `registry.tmp`→`registry.bin` 的 rename，`registry.bin` 常为 0 字节；验证表盘里加了 `os.remove("/data/canopus/registry.bin")`（**仅模拟器需要**，真机 rename 原子无需此分支）
+  - `ACTIVATE` 后的 stage-2 自动 `page_goto` 采用 `ctx->ui->post` 在 UI 任务执行（返回 0，页面确实创建），但在 lua 验证表盘继续操作 UI 后会被系统回收；**可靠入口是 launcher 图标**（参考实现也只保证注册与页面描述符）
+  - x-nes 仅保留 NROM/UxROM/CNROM 所需 mapper；更大 ROM 仍受 128 KiB 模块堆限制
 - 下次从这里继续：
-  1. 阅读 `REPORT.md` §7，按设备验证清单在真机安装 `dist/nespro-0.1.0.canopus`，确认日志 `display 336x480`、画面出现且持续刷新
-  2. 若栈溢出 → 改为静态原地初始化 `Bus`；若 OOM → 缩小 ROM 或改按 bank 读取
-  3. 设备侧计时每帧耗时，决定是否下调 `INSTRUCTION_BUDGET` / 定时器周期
+  1. 若需自动打开页面，尝试在真实表盘环境（无 lua 持续 UI 操作）复测 stage-2；必要时改由模块自有 LVGL 定时器延后调用 `page_goto`
+  2. 真机（非模拟器）安装 `deliverables/nespro-0.1.0.canopus` 复核；放入 `/data/canopus/nespro.nes` 验证 ROM 文件加载

@@ -13,6 +13,7 @@
 
 extern crate alloc;
 
+mod cart;
 mod nes_frame;
 
 use alloc::vec::Vec;
@@ -27,15 +28,18 @@ use core::ffi::{c_char, c_void};
 use core::mem::MaybeUninit;
 use core::ptr::{null, null_mut};
 use core::sync::atomic::{AtomicPtr, AtomicU32, AtomicU8, Ordering};
-use nes::Emulator;
+use nes::cpu::CpuRp2a03;
+use nes::mapper::Mapper;
 use nes::rom::Rom;
+use nes::{reset, Emulator};
 use nes_frame::{NES_HEIGHT, NES_PIXELS, NES_WIDTH, convert_frame};
 
 const MAGIC: u32 = 0x4E455350; // "NESP"
 const ROM_PATH: &[u8] = b"/data/canopus/nespro.nes\0";
 const TIMER_PERIOD_MS: u32 = 33;
-/// Upper bound of instructions executed per UI timer tick (~one NES frame).
-const INSTRUCTION_BUDGET: u32 = 120_000;
+/// Upper bound of instructions executed per UI timer tick (~one NES frame is
+/// ~30k cycles, so this cap only matters when a ROM never finishes a frame).
+const INSTRUCTION_BUDGET: u32 = 40_000;
 
 // ---------------------------------------------------------------------------
 // Context + allocator
@@ -215,6 +219,7 @@ static TIMER: AtomicPtr<c_void> = AtomicPtr::new(null_mut());
 
 static mut EMU: MaybeUninit<Emulator> = MaybeUninit::uninit();
 static mut EMU_READY: bool = false;
+static FIRST_FRAME_LOGGED: AtomicU8 = AtomicU8::new(0);
 
 /// Embedded generated NROM test ROM (our own work, no copyrighted content).
 static TEST_ROM: &[u8] = include_bytes!("../../roms/nespro-test.nes");
@@ -279,17 +284,49 @@ unsafe fn read_rom_from_fs(c: *const ContextV1) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Initialises a 76 KiB `Emulator` in place instead of on the current stack.
+///
+/// `Emulator::new`, `Bus::new` and `Ppu::new` all return their whole state by
+/// value, so calling them materialises the entire emulator (76,344 B) in the
+/// caller's frame. Page callbacks run on the firmware UI task, whose stack is
+/// only a few KiB: that overflow is what froze the watch as soon as the module
+/// was enabled. Every write below goes through a raw pointer, so the largest
+/// temporary the compiler can create is one `Mapper` (two words).
+unsafe fn emulator_init_in_place(dst: *mut Emulator, mapper: Mapper) {
+    let bus = unsafe { core::ptr::addr_of_mut!((*dst).bus) };
+    let cpu = unsafe { core::ptr::addr_of_mut!((*dst).cpu) };
+    // A zeroed image is a valid video-only state: `Ppu::new` only differs in
+    // `odd_frame` (written below) and sprite-0-hit tracking, which is re-armed
+    // at every prerender line; `Apu::new`'s other non-zero defaults only
+    // change audio timbre, and its sample period is set below.
+    unsafe { core::ptr::write_bytes(dst as *mut u8, 0, core::mem::size_of::<Emulator>()) };
+    unsafe { core::ptr::addr_of_mut!((*bus).mapper).write(mapper) };
+    unsafe { core::ptr::addr_of_mut!((*bus).ppu.odd_frame).write(true) };
+    unsafe { (*bus).apu.set_sample_rate(44_100) };
+    unsafe { cpu.write(CpuRp2a03::new(0)) };
+    // Same final step as `Emulator::new`: load the reset vector through the bus.
+    unsafe { reset(&mut *cpu, &mut *bus) };
+}
+
 unsafe fn start_emulator(rom_bytes: &[u8]) -> bool {
     let Ok(rom) = Rom::new(rom_bytes) else {
         return false;
     };
-    let mapper = rom.create_mapper();
-    // The mapper owns its PRG/CHR copy; release `rom` before allocating the
-    // 74 KiB emulator so peak heap use stays inside the 128 KiB module heap.
-    drop(rom);
-    let emu = Emulator::new(mapper);
+    let Rom {
+        prg,
+        chr,
+        mapper_id,
+        mirroring,
+        has_chr_ram,
+    } = rom;
+    // Heap-backed mappers: x-nes builds them in 40 KiB inline arrays on the
+    // stack (`Nrom::new`) or 48 KiB (`Mapper::from_ines`), which cannot fit in
+    // the UI task stack. `Cart` only moves the parsed vectors.
+    let Some(cart) = cart::Cart::new(prg, chr, has_chr_ram, mirroring, mapper_id) else {
+        return false;
+    };
     unsafe {
-        EMU.as_mut_ptr().write(emu);
+        emulator_init_in_place(EMU.as_mut_ptr(), cart.into_mapper());
         EMU_READY = true;
     }
     true
@@ -324,6 +361,9 @@ extern "C" fn frame_timer(_timer: *mut c_void) {
         }
         emu.bus.ppu.frame_complete = false;
         convert_frame(&emu.bus.ppu.frame, &mut FB);
+        if FIRST_FRAME_LOGGED.swap(1, Ordering::Relaxed) == 0 {
+            log_info(ctx(), b"nespro first frame\0");
+        }
 
         let image = IMAGE.load(Ordering::Acquire);
         if image.is_null() {
@@ -382,10 +422,22 @@ extern "C" fn page_on_create(
         }
         let rom = read_rom_from_fs(c);
         let started = match rom.as_deref() {
-            Some(bytes) => start_emulator(bytes),
-            None => start_emulator(TEST_ROM),
+            Some(bytes) => {
+                log_info(c, b"nespro rom /data/canopus/nespro.nes\0");
+                if start_emulator(bytes) {
+                    true
+                } else {
+                    log_info(c, b"nespro rom unsupported, builtin test rom\0");
+                    start_emulator(TEST_ROM)
+                }
+            }
+            None => {
+                log_info(c, b"nespro rom builtin test rom\0");
+                start_emulator(TEST_ROM)
+            }
         };
         if !started {
+            log_info(c, b"nespro start failed\0");
             return -1;
         }
         // Draw the first frame immediately so the page is never blank.
@@ -457,6 +509,19 @@ extern "C" fn query(w: *mut StatusWriterV1) -> i32 {
     0
 }
 
+/// Stage 2 runs on the Supervisor heartbeat, where a direct page switch is
+/// undone as soon as the UI task next runs. Hop onto the UI task first so the
+/// navigation is performed by its owner.
+extern "C" fn navigate_to_app(c: *const ContextV1, _data: *mut c_void) {
+    let app_id = APP_ID.load(Ordering::Acquire);
+    if app_id == 0 {
+        return;
+    }
+    unsafe {
+        activity_navigate(app_id << 16, 0, 0, 0);
+    }
+}
+
 extern "C" fn publish_native_app_stage(c: *const ContextV1, stage: u32) -> i32 {
     if stage == 1 {
         if !unsafe { services_has(c, SVC_LAUNCHER, 1) } {
@@ -502,8 +567,16 @@ extern "C" fn publish_native_app_stage(c: *const ContextV1, stage: u32) -> i32 {
         if app_id == 0 {
             return -1;
         }
+        let Some(ctx_ref) = (unsafe { (c as *const CanopusContext).as_ref() }) else {
+            return -1;
+        };
+        let Some(ui) = (unsafe { ctx_ref.ui.as_ref() }) else {
+            return -1;
+        };
         unsafe {
-            activity_navigate(app_id << 16, 0, 0, 0);
+            if (ui.post)(c, navigate_to_app, null_mut()) < 0 {
+                navigate_to_app(c, null_mut());
+            }
         }
         0
     } else {
@@ -544,5 +617,10 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
-    loop {}
+    // Never return into the firmware: record the fault, then fail closed and
+    // let the watchdog reset the device instead of hanging the UI task.
+    unsafe { log_info(ctx(), b"nespro panic\0") };
+    loop {
+        core::hint::spin_loop();
+    }
 }

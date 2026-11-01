@@ -12,13 +12,13 @@ default = []
 device = []
 
 [dependencies]
-canopus-abi = { path = "/workspace/nes-band10pro/vendor/canopus/sdk/rust/canopus-abi" }
-canopus-runtime = { path = "/workspace/nes-band10pro/vendor/canopus/sdk/rust/canopus-runtime" }
+canopus-abi = { path = "../vendor/canopus/sdk/rust/canopus-abi" }
+canopus-runtime = { path = "../vendor/canopus/sdk/rust/canopus-runtime" }
 # Exact-target private LVGL facade + generated firmware symbol constants.
-canopus-target-private = { path = "/workspace/nes-band10pro/vendor/canopus/sdk/rust/canopus-target-private", default-features = false }
-canopus-target-generated = { path = "/workspace/nes-band10pro/vendor/canopus/sdk/rust/canopus-target-generated", default-features = false }
+canopus-target-private = { path = "../vendor/canopus/sdk/rust/canopus-target-private", default-features = false }
+canopus-target-generated = { path = "../vendor/canopus/sdk/rust/canopus-target-generated", default-features = false }
 # NES core. no_std build; the module supplies the allocator and panic handler.
-x-nes = { path = "/workspace/nes-band10pro/vendor/x-nes", default-features = false }
+x-nes = { path = "../vendor/x-nes", default-features = false }
 
 # A standalone crate, also when it lives inside a Canopus checkout.
 [workspace]
