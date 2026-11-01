@@ -34,14 +34,19 @@ use nes::{reset, Emulator};
 use nes_frame::{NES_HEIGHT, NES_PIXELS, NES_WIDTH, convert_frame};
 
 const MAGIC: u32 = 0x4E455350; // "NESP"
-/// Time-service tick: 20 UI updates per second, well below the panel rate.
-const TIMER_PERIOD_MS: u32 = 50;
-/// Emulated frames per tick, so a 60 Hz game still advances at real speed
-/// (3 x 20 Hz) while the display only repaints 20 times a second.
-const FRAMES_PER_TICK: usize = 3;
-/// Instruction budget per tick; three NES frames are roughly 30k-45k
-/// instructions, and the whole budget runs off the LVGL task.
-const INSTRUCTION_BUDGET: u32 = 60_000;
+/// The Supervisor time pump is an LVGL timer on the UI task, so every callback
+/// steals UI time. Fire often and keep each slice small instead of doing a
+/// whole frame at once.
+const TIMER_PERIOD_MS: u32 = 10;
+/// Wall-clock budget for one emulation slice (the rest of the tick stays with
+/// the UI task).
+const SLICE_TARGET_MS: u32 = 4;
+/// Adaptive instruction budget per slice, in instructions.
+const BUDGET_START: u32 = 1024;
+const BUDGET_MIN: u32 = 256;
+const BUDGET_MAX: u32 = 4096;
+/// Never republish faster than this; the panel cannot show more anyway.
+const PUBLISH_MIN_MS: u32 = 50;
 
 // ---------------------------------------------------------------------------
 // Context + allocator
@@ -225,6 +230,17 @@ static LAST_FRAME_HASH: AtomicU32 = AtomicU32::new(0);
 /// `0` until the first frame has been queued (so a hash of zero still draws).
 static HAS_FRAME: AtomicU8 = AtomicU8::new(0);
 
+// Per-session performance counters, reported once when the page closes.
+static BUDGET: AtomicU32 = AtomicU32::new(BUDGET_START);
+static LAST_PUBLISH_MS: AtomicU32 = AtomicU32::new(0);
+static SESSION_START_MS: AtomicU32 = AtomicU32::new(0);
+static TICKS: AtomicU32 = AtomicU32::new(0);
+static INSTRUCTIONS: AtomicU32 = AtomicU32::new(0);
+static FRAMES: AtomicU32 = AtomicU32::new(0);
+static PUBLISHED: AtomicU32 = AtomicU32::new(0);
+static SLICE_SUM_MS: AtomicU32 = AtomicU32::new(0);
+static SLICE_MAX_MS: AtomicU32 = AtomicU32::new(0);
+
 // ---------------------------------------------------------------------------
 // Emulator state
 // ---------------------------------------------------------------------------
@@ -404,9 +420,47 @@ unsafe fn ensure_emulator(c: *const ContextV1) -> bool {
     started
 }
 
-/// Supervisor timer-tick: emulate, then hand the finished frame to the UI task.
-/// `FRAME_PENDING` pauses the core until the UI swapped the image source, so
-/// the UI never converts a half-written frame buffer.
+/// Wall clock from the Supervisor time service.
+unsafe fn now_ms(c: *const ContextV1) -> u32 {
+    let Some(ctx_ref) = (unsafe { (c as *const CanopusContext).as_ref() }) else {
+        return 0;
+    };
+    let Some(time) = (unsafe { ctx_ref.time.as_ref() }) else {
+        return 0;
+    };
+    unsafe { (time.monotonic_ms)(c) }
+}
+
+/// Writes the session's measured throughput once, when the page closes. It is
+/// a single small file, so flash wear is negligible compared with per-frame
+/// logging.
+unsafe fn write_perf(c: *const ContextV1) {
+    let Some(ctx_ref) = (unsafe { (c as *const CanopusContext).as_ref() }) else {
+        return;
+    };
+    let ticks = TICKS.load(Ordering::Relaxed);
+    let instructions = INSTRUCTIONS.load(Ordering::Relaxed);
+    let frames = FRAMES.load(Ordering::Relaxed);
+    let published = PUBLISHED.load(Ordering::Relaxed);
+    let avg = if ticks > 0 { SLICE_SUM_MS.load(Ordering::Relaxed) / ticks } else { 0 };
+    let max = SLICE_MAX_MS.load(Ordering::Relaxed);
+    let session = now_ms(c).wrapping_sub(SESSION_START_MS.load(Ordering::Relaxed));
+    let ips = if session > 0 {
+        (instructions as u64) * 1000 / session as u64
+    } else {
+        0
+    };
+    let text = alloc::format!(
+        "ticks={} instr={} frames={} published={} avg_slice_ms={} max_slice_ms={} session_ms={} instr_per_s={} budget={}\n",
+        ticks, instructions, frames, published, avg, max, session, ips, BUDGET.load(Ordering::Relaxed)
+    );
+    let _ = canopus_runtime::fs::write_all(ctx_ref, "perf.txt", text.as_bytes());
+}
+
+/// UI timer-tick: emulate for at most one small slice, then hand the finished
+/// frame to the UI task. The Supervisor pump runs on the LVGL task, so the
+/// slice is capped by wall time and its instruction budget adapts to the
+/// measured speed instead of blocking a whole frame at a time.
 extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_void) {
     if PAGE_ACTIVE.load(Ordering::Acquire) == 0 {
         return;
@@ -422,21 +476,54 @@ extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_vo
         if FRAME_PENDING.load(Ordering::Acquire) != 0 {
             return;
         }
+        let start = now_ms(c);
+        if SESSION_START_MS.load(Ordering::Acquire) == 0 {
+            SESSION_START_MS.store(start.max(1), Ordering::Release);
+        }
+        TICKS.fetch_add(1, Ordering::Relaxed);
+
         let emu = &mut *EMU.as_mut_ptr();
-        let mut budget = INSTRUCTION_BUDGET;
-        let mut frames = 0usize;
-        while frames < FRAMES_PER_TICK && budget > 0 {
-            while !emu.bus.ppu.frame_complete && budget > 0 {
-                let _ = emu.tick();
-                budget -= 1;
-            }
-            if !emu.bus.ppu.frame_complete {
+        let budget = BUDGET.load(Ordering::Acquire);
+        let mut executed = 0u32;
+        let mut frame_done = false;
+        let mut time_limited = false;
+        while executed < budget {
+            let _ = emu.tick();
+            executed += 1;
+            if emu.bus.ppu.frame_complete {
+                emu.bus.ppu.frame_complete = false;
+                frame_done = true;
                 break;
             }
-            emu.bus.ppu.frame_complete = false;
-            frames += 1;
+            if (executed & 31) == 0 {
+                let elapsed = now_ms(c).wrapping_sub(start);
+                if elapsed >= SLICE_TARGET_MS {
+                    time_limited = true;
+                    break;
+                }
+            }
         }
-        if frames == 0 {
+        INSTRUCTIONS.fetch_add(executed, Ordering::Relaxed);
+        let slice_ms = now_ms(c).wrapping_sub(start);
+        SLICE_SUM_MS.fetch_add(slice_ms, Ordering::Relaxed);
+        if slice_ms > SLICE_MAX_MS.load(Ordering::Relaxed) {
+            SLICE_MAX_MS.store(slice_ms, Ordering::Relaxed);
+        }
+        if time_limited && slice_ms > 0 {
+            let next = (budget.saturating_mul(SLICE_TARGET_MS) / slice_ms)
+                .clamp(BUDGET_MIN, BUDGET_MAX);
+            BUDGET.store(next, Ordering::Release);
+        } else if !frame_done && executed >= budget {
+            BUDGET.store(budget.saturating_mul(2).min(BUDGET_MAX), Ordering::Release);
+        }
+        if !frame_done {
+            return;
+        }
+        FRAMES.fetch_add(1, Ordering::Relaxed);
+
+        let now = now_ms(c);
+        let last = LAST_PUBLISH_MS.load(Ordering::Acquire);
+        if last != 0 && now.wrapping_sub(last) < PUBLISH_MIN_MS {
             return;
         }
         let hash = frame_hash(&emu.bus.ppu.frame);
@@ -447,6 +534,8 @@ extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_vo
         }
         LAST_FRAME_HASH.store(hash, Ordering::Release);
         HAS_FRAME.store(1, Ordering::Release);
+        LAST_PUBLISH_MS.store(now.max(1), Ordering::Release);
+        PUBLISHED.fetch_add(1, Ordering::Relaxed);
         FRAME_PENDING.store(1, Ordering::Release);
         let Some(ctx_ref) = ((c as *const CanopusContext).as_ref()) else {
             FRAME_PENDING.store(0, Ordering::Release);
@@ -573,7 +662,16 @@ extern "C" fn page_on_create(
             log_info(c, b"display resolution differs from 336x480\0");
         }
         // The page opens with an empty image; the timer task loads the ROM and
-        // draws the first frame off the UI thread.
+        // draws the first frame, one small slice at a time.
+        BUDGET.store(BUDGET_START, Ordering::Release);
+        LAST_PUBLISH_MS.store(0, Ordering::Release);
+        SESSION_START_MS.store(0, Ordering::Release);
+        TICKS.store(0, Ordering::Release);
+        INSTRUCTIONS.store(0, Ordering::Release);
+        FRAMES.store(0, Ordering::Release);
+        PUBLISHED.store(0, Ordering::Release);
+        SLICE_SUM_MS.store(0, Ordering::Release);
+        SLICE_MAX_MS.store(0, Ordering::Release);
         PAGE_ACTIVE.store(1, Ordering::Release);
         start_runtime(c);
     }
@@ -598,8 +696,10 @@ extern "C" fn page_on_pause(_page: *mut PageDescriptor) -> i32 {
 
 extern "C" fn page_on_destroy(_page: *mut PageDescriptor) -> i32 {
     unsafe {
+        let c = ctx();
         PAGE_ACTIVE.store(0, Ordering::Release);
-        stop_runtime(ctx(), true);
+        stop_runtime(c, true);
+        write_perf(c);
         IMAGE.store(null_mut(), Ordering::Release);
         FRAME_PENDING.store(0, Ordering::Release);
         EMU_READY = false;
@@ -748,8 +848,8 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
         | FLAG_REGISTERS_LAUNCHER_ENTRY
         | FLAG_APP_UNREGISTER_REBOOT_REQUIRED,
     module_id: pack(b"nespro"),
-    module_version: pack(b"0.1.1"),
-    build_id: pack(b"nespro-0.1.1"),
+    module_version: pack(b"0.1.2"),
+    build_id: pack(b"nespro-0.1.2"),
     target_id: pack(env!("CANOPUS_TARGET_ID").as_bytes()),
     prepare: Some(canopus_mod_prepare),
     activate: Some(activate),

@@ -8,7 +8,7 @@
 │   ├── Canopus.toml            # module id/version/kind=target, targets = 043
 │   ├── Cargo.toml              # staticlib；依赖 canopus-abi/runtime/target-private/target-generated + x-nes
 │   ├── build/xiaomi-band-10-pro-3.101.043/nespro.elf
-│   ├── dist/nespro-0.1.1.canopus
+│   ├── dist/nespro-0.1.2.canopus
 │   └── src/
 │       ├── lib.rs              # 生命周期、launcher 注册、LVGL 页面、定时器、分配器
 │       └── nes_frame.rs        # 调色板 → RGB565 转换（设备与主机共用）
@@ -27,7 +27,7 @@
 
 **模块描述符**（`canopus_module_descriptor`，ABI 2）：
 
-- `module_id = "nespro"`、`version = "0.1.1"`、`target_id = env!("CANOPUS_TARGET_ID")`
+- `module_id = "nespro"`、`version = "0.1.2"`、`target_id = env!("CANOPUS_TARGET_ID")`
 - flags：`FLAG_HAS_NATIVE_APP | FLAG_REGISTERS_LAUNCHER_ENTRY | FLAG_APP_UNREGISTER_REBOOT_REQUIRED`
 - 生命周期：`prepare` 保存 ctx；`activate` 记录日志；`stop` 释放标记；`query` 返回 `0x4E455350`（"NESP"）
 
@@ -76,7 +76,7 @@ CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus canopus build
 # 3) 打包并校验
 CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus canopus package --build
 CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus \
-  canopus package verify dist/nespro-0.1.1.canopus
+  canopus package verify dist/nespro-0.1.2.canopus
 
 # 4) 主机侧画面验证（可选，重新生成 out/*.ppm/*.png）
 cd /workspace/nes-band10pro/hostverify
@@ -87,15 +87,15 @@ cargo run --release -- ../roms/nespro-test.nes out
 
 | 产物 | 绝对路径 | sha256 | 说明 |
 | --- | --- | --- | --- |
-| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `b3ab0399889cb762734fd82ebed8a799d7b12c63a69d22db09a60350a7c3589f` | verifier PASS：15 sections、451,976 resident bytes、0 undefined、15,292 relocs、1 ctor / 1 dtor |
-| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.1.canopus` | `b5f30bccd9233d57268db97985ef981c49e46905f41672b4ae2b86e4184651ad` | 489,472 B；`package verify` OK；1 target |
+| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `b26fa5bb743d710c808519238214f6067fd7e98825872abfaf6d817b9a20e387` | verifier PASS：15 sections、455,416 resident bytes、0 undefined、15,385 relocs、1 ctor / 1 dtor |
+| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.2.canopus` | `2fa42ee0187f7b73b1b9ae61fff91740637af4161fbddd34101f3eb7d542672b` | 497,664 B；`package verify` OK；1 target |
 | 测试 ROM | `/workspace/nes-band10pro/roms/nespro-test.nes` | 生成脚本可复现 | 16,400 B（16 B header + 16 KiB PRG，CHR RAM） |
 
 ### `.canopus` 包结构（tar）
 
 ```
 artifacts/xiaomi-band-10-pro-3.101.043/module.elf   (680,616 B, sha256 = ELF 的 sha256)
-manifest.json                                       (module_id nespro, version 0.1.1, abi 2, target_pack_revision 8)
+manifest.json                                       (module_id nespro, version 0.1.2, abi 2, target_pack_revision 8)
 receipts/xiaomi-band-10-pro-3.101.043.cmi           (CMI2 receipt, 176 B)
 ```
 
@@ -154,3 +154,18 @@ ROM 放置：`/data/canopus/nespro.nes`（不存在时自动使用内嵌测试 R
 版本提升到 0.1.1：同版本重复安装会返回 `-105 STAGE_DUPLICATE`，不会替换旧二进制。
 
 `tools/make_expected.py` 可在无 NES 核的情况下输出测试 ROM 的期望画面（13 色），用于和实拍对比通道/偏移。
+
+
+## 10. 0.1.2：把模拟切成小时间片
+
+真机实测表明 `ctx->time` 的定时器 pump 是 UI owner 上的 LVGL 定时器（源码：`sup_start_timer_pump` 用 `CANOPUS_SUP_LV_TIMER_CREATE(..., 10u, 0)`），所以“移到定时器任务”并不等于离开 UI。
+
+0.1.2 改为：
+
+- 定时器 10 ms 一跳；
+- 每跳按 `ctx->time->monotonic_ms` 计时，**一次只跑 ≤4 ms**（指令预算 256–4096 自适应：超时按 `budget*4/elapsed` 缩小，跑得完则翻倍）；
+- 一帧跑完就发布；发布间隔 ≥50 ms，多余帧直接丢；
+- 画面不变（FNV 校验和相同）不转换、不重绘；
+- 页面关闭时写一次 `perf.txt`：`ticks/instr/frames/published/avg_slice_ms/max_slice_ms/session_ms/instr_per_s/budget`。
+
+用这份数据即可判断瓶颈是 6502 吞吐还是 LVGL 重绘，再调 `SLICE_TARGET_MS`、`PUBLISH_MIN_MS`。
