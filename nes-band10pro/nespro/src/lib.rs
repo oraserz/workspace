@@ -427,15 +427,19 @@ unsafe fn ensure_emulator(c: *const ContextV1) -> bool {
     started
 }
 
-/// Wall clock from the Supervisor time service.
-unsafe fn now_ms(c: *const ContextV1) -> u32 {
-    let Some(ctx_ref) = (unsafe { (c as *const CanopusContext).as_ref() }) else {
-        return 0;
+/// Cheap millisecond tick read straight from LVGL's global counter.
+///
+/// `ctx->time->monotonic_ms` goes through the Supervisor/OS clock path, which
+/// measured at several milliseconds per call on this firmware: calling it once
+/// per tick collapsed the instruction budget to its floor. `lv_tick_get` is
+/// the same counter the UI advances (recovered at 0x1c063d0c and exported as
+/// `CANOPUS_FW_LV_TICK_GET_CALLABLE`), so a read is a plain load.
+unsafe fn now_ms(_c: *const ContextV1) -> u32 {
+    type F = extern "C" fn() -> u32;
+    let f: F = unsafe {
+        core::mem::transmute(canopus_target_generated::CANOPUS_FW_LV_TICK_GET_CALLABLE)
     };
-    let Some(time) = (unsafe { ctx_ref.time.as_ref() }) else {
-        return 0;
-    };
-    unsafe { (time.monotonic_ms)(c) }
+    f()
 }
 
 /// Writes the session's measured throughput once, when the page closes. It is
@@ -874,8 +878,8 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
         | FLAG_REGISTERS_LAUNCHER_ENTRY
         | FLAG_APP_UNREGISTER_REBOOT_REQUIRED,
     module_id: pack(b"nespro"),
-    module_version: pack(b"0.1.4"),
-    build_id: pack(b"nespro-0.1.4"),
+    module_version: pack(b"0.1.5"),
+    build_id: pack(b"nespro-0.1.5"),
     target_id: pack(env!("CANOPUS_TARGET_ID").as_bytes()),
     prepare: Some(canopus_mod_prepare),
     activate: Some(activate),

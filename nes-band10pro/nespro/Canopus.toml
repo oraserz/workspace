@@ -2,8 +2,8 @@ schema = 1
 
 [module]
 id = "nespro"
-version = "0.1.4"
-version_code = 5
+version = "0.1.5"
+version_code = 6
 kind = "target"
 language = "rust"
 lifecycle = "removable"
