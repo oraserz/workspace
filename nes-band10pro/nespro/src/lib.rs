@@ -818,9 +818,14 @@ extern "C" fn page_on_pause(_page: *mut PageDescriptor) -> i32 {
         stop_runtime(ctx(), false);
         // Screen-off pauses the page; write the counters once so a session
         // that never gets a real destroy still leaves evidence behind.
-        let c = ctx();
-        if PERF_WRITTEN.load(Ordering::Acquire) == 0 && TICKS.load(Ordering::Relaxed) > 0 {
-            write_perf(c);
+        // The benchmark must finish its fixed instruction count before the
+        // file is meaningful, so it only writes on completion.
+        #[cfg(not(offscreen))]
+        {
+            let c = ctx();
+            if PERF_WRITTEN.load(Ordering::Acquire) == 0 && TICKS.load(Ordering::Relaxed) > 0 {
+                write_perf(c);
+            }
         }
     }
     0

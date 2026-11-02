@@ -39,7 +39,7 @@
 - 0.1.6 真机（LVGL tick）数据：`ticks=1289 instr=653743 frames=67 published=10 avg_slice_ms=15 max_slice_ms=92 session_ms=28209 instr_per_s=23174 budget=512` → 每指令约 30 µs，计时不是瓶颈。
 - 发现 `canopus build` 强制 `CARGO_PROFILE_RELEASE_OPT_LEVEL="z"`；改用 `RUSTFLAGS="-C opt-level=3"` 覆盖。
 - 版本 0.1.7（version_code 8）重建：`deliverables/nespro-0.1.7.canopus`（636,928 B，sha256 `e626af63…4337`），ELF sha256 `cf08ff10…780b`，resident 769,460 B。
-- 0.2.0 离屏基准包：`deliverables/nespro-0.2.0-offscreen.canopus`（633,344 B，sha256 `3ffd8f79…6296`），ELF sha256 `3542ec6b…eb04`，resident 644,520 B；`perf.txt` 带 `mode=offscreen` 与 `ns_per_instr`。
+- 0.2.0 离屏基准包：`deliverables/nespro-0.2.0-offscreen.canopus`（633,344 B，sha256 `3ffd8f79…6296`），ELF sha256 `3542ec6b…eb04`，resident 644,484 B；`perf.txt` 带 `mode=offscreen` 与 `ns_per_instr`。
 - 风险：模块镜像从 455 KB 涨到 768 KB，若设备加载失败可退 opt-level=2。
 
 ## 未完成 / 待用户测试
