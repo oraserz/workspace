@@ -3,7 +3,7 @@
 - 仓库/分支：`https://github.com/oraserz/workspace.git`，`trae/agent-GbKpGn`
 - vendor：Canopus `4928f1eb`、x-nes `ca4c3955`（本地 symlink 到 `/workspace/.projects/*`，未修改模块管理器源码）
 - 上次执行时间：2026-11-01
-- 当前阶段：0.1.6 = 0.1.5 + `perf.txt` 自证版本（首行 `ver=0.1.6 tick=lv`）与息屏时写一次统计，**待真机复测**
+- 当前阶段：0.1.7 用 `RUSTFLAGS=-C opt-level=3` 覆盖 canopus 强制的 `z`，**待真机复测（含模块镜像 768 KB 能否加载）**
 
 ## 已完成
 
@@ -32,14 +32,18 @@
 - 0.1.4 真机 perf：`ticks=1331 instr=675023 frames=69 published=8 avg_slice_ms=16 max_slice_ms=93 session_ms=30770 instr_per_s=21937 budget=512`。
 - 判定：`ctx->time->monotonic_ms` 每次约 7–8 ms，一拍两次即占满时间片；6502 解释器本身不是瓶颈。
 - 改用 `CANOPUS_FW_LV_TICK_GET_CALLABLE`（`lv_tick_get`，0x1c063d0c），读全局毫秒计数。
-### 0.1.6（本次）
+### 0.1.6（commit `3d17e9a`）
 - 用户上报的 perf 两次数值完全一致（1331/675023/69/8/16/93/30770/21937/512），判断为 0.1.4 遗留文件；0.1.5 的 LVGL tick 尚未真正测到。
 - perf.txt 首行加 `ver=0.1.6 tick=lv`；页面首次 pause（息屏）且有 tick 时也写一次。
-- 版本 0.1.6（version_code 7）；产物 `deliverables/nespro-0.1.6.canopus`（497,664 B，sha256 `e4fbbc80…0494`），ELF sha256 `508618fe…21def`，`package verify` OK。
+### 0.1.7（本次）
+- 0.1.6 真机（LVGL tick）数据：`ticks=1289 instr=653743 frames=67 published=10 avg_slice_ms=15 max_slice_ms=92 session_ms=28209 instr_per_s=23174 budget=512` → 每指令约 30 µs，计时不是瓶颈。
+- 发现 `canopus build` 强制 `CARGO_PROFILE_RELEASE_OPT_LEVEL="z"`；改用 `RUSTFLAGS="-C opt-level=3"` 覆盖。
+- 版本 0.1.7（version_code 8）；产物 `deliverables/nespro-0.1.7.canopus`（634,880 B，sha256 `cb78b2af…6110`），ELF sha256 `b00790aa…6e5a`，resident 768,432 B，`package verify` OK。
+- 风险：模块镜像从 455 KB 涨到 768 KB，若设备加载失败可退 opt-level=2。
 
 ## 未完成 / 待用户测试
 
-1. 真机安装 0.1.6（先 REMOVE 旧版本，或直接用新版本号覆盖）。
+1. 真机安装 0.1.7（先 REMOVE 旧版本）；重点看 768 KB 镜像能否加载、`perf.txt` 的 `instr_per_s` 是否提升。
 2. 观察打开/退出是否跟手；帧率是否符合预期。
 3. **把 `/data/canopus/m.nespro/perf.txt` 的内容发回来**，按 `instr_per_s` / `avg_slice_ms` 调 `SLICE_TARGET_MS` 与 `PUBLISH_MIN_MS`。
 4. 超级玛丽：ROM 放到 `/data/canopus/m.nespro/nespro.nes`（或 `supermary.nes`）。

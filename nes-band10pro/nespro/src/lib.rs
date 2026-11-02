@@ -463,7 +463,7 @@ unsafe fn write_perf(c: *const ContextV1) {
         0
     };
     let text = alloc::format!(
-        "ver=0.1.6 tick=lv\nticks={} instr={} frames={} published={} avg_slice_ms={} max_slice_ms={} session_ms={} instr_per_s={} budget={}\n",
+        "ver=0.1.7 tick=lv\nticks={} instr={} frames={} published={} avg_slice_ms={} max_slice_ms={} session_ms={} instr_per_s={} budget={}\n",
         ticks, instructions, frames, published, avg, max, session, ips, BUDGET.load(Ordering::Relaxed)
     );
     let _ = canopus_runtime::fs::write_all(ctx_ref, "perf.txt", text.as_bytes());
@@ -887,8 +887,8 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
         | FLAG_REGISTERS_LAUNCHER_ENTRY
         | FLAG_APP_UNREGISTER_REBOOT_REQUIRED,
     module_id: pack(b"nespro"),
-    module_version: pack(b"0.1.6"),
-    build_id: pack(b"nespro-0.1.6"),
+    module_version: pack(b"0.1.7"),
+    build_id: pack(b"nespro-0.1.7"),
     target_id: pack(env!("CANOPUS_TARGET_ID").as_bytes()),
     prepare: Some(canopus_mod_prepare),
     activate: Some(activate),

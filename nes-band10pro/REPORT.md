@@ -18,13 +18,13 @@
 
 | 交付物 | 路径 | 校验 |
 | --- | --- | --- |
-| 可安装模块包 | `deliverables/nespro-0.1.6.canopus` | 497,664 B；sha256 `e4fbbc8006e5ab173e753bfacccb573eeedd335e9e29c8273d4beb70e2fd0494`；`package verify` → `package OK` |
-| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `508618fe2b96347eaa1784d63d7779fa92f31be3c7031d60a2e629f1f8621def`；`PASS (15 sections, 455508 resident bytes, 0 undefined, 15384 relocs, 1 ctors, 1 dtors)` |
+| 可安装模块包 | `deliverables/nespro-0.1.7.canopus` | 634,880 B；sha256 `cb78b2af6117299756b8a96de9ad2c3027ee470ee98f1e637ede090168dc6110`；`package verify` → `package OK` |
+| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `b00790aacca793a70103c7c062d7624c6b03a1a6dd31991de0b8d1eb01f36e5a`；`PASS (15 sections, 768432 resident bytes, 0 undefined, 2745 relocs, 1 ctors, 1 dtors)` |
 | Launcher 安装器 | `deliverables/nespro-installer-xiaomi-band-10-pro/`、`.zip` | 含新 ELF/CMI |
 | 自产测试 ROM | `roms/nespro-test.nes` | NROM-128 / mapper 0 / CHR RAM |
 | 期望画面脚本 | `/workspace/verify/nespro/make_expected.py` | 输出 256×240 / 336×315 / 整页 PNG，13 色 |
 
-**版本号提升到 0.1.6**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。
+**版本号提升到 0.1.7**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。
 
 ## 3. 卡死根因（已修复）
 
@@ -32,7 +32,7 @@
 
 修复：`emulator_init_in_place` 原地零初始化；`cart::Cart` 用 `Vec` 承载 PRG/CHR；UI 回调不再有大栈帧。
 
-## 4. 卡顿根因与本次结构调整（0.1.5 使用 LVGL tick）
+## 4. 卡顿根因与本次结构调整（0.1.7 提升编译优化）
 
 真机反馈：不是死机，内存也没爆，手机仍能请求打开应用，只是 **UI 响应慢**；息屏再亮屏后能正常退出 → 负担全在 LVGL/UI 线程。
 
@@ -103,3 +103,14 @@ instr_per_s=21937 budget=512
 ```
 
 每个 tick 约 507 条指令却耗时 16 ms；`budget` 仍被压到最小值。结合 0.1.1（没有时钟调用）能跑到约 10 fps，说明瓶颈是 `ctx->time->monotonic_ms`：该固件上一次调用约 7–8 ms，一拍两次就吃掉整个时间片。0.1.5 改用 LVGL 全局 tick，读一次就是普通内存加载。
+
+
+## 10. 真机数据（0.1.6，LVGL tick）
+
+```
+ticks=1289 instr=653743 frames=67 published=10
+avg_slice_ms=15 max_slice_ms=92 session_ms=28209
+instr_per_s=23174 budget=512
+```
+
+换成 LVGL tick 后数字几乎不变 → **计时不是瓶颈，每指令 ~30 µs 是真实成本**。在 `canopus build` 源码里发现它强制设置 `CARGO_PROFILE_RELEASE_OPT_LEVEL="z"`（体积优先）。0.1.7 通过 `RUSTFLAGS="-C opt-level=3"` 覆盖为速度优先（比 fat LTO 版本小 16 KB）。模块镜像增大到 768 KB，需确认设备可加载。

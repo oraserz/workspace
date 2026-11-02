@@ -8,7 +8,7 @@
 │   ├── Canopus.toml            # module id/version/kind=target, targets = 043
 │   ├── Cargo.toml              # staticlib；依赖 canopus-abi/runtime/target-private/target-generated + x-nes
 │   ├── build/xiaomi-band-10-pro-3.101.043/nespro.elf
-│   ├── dist/nespro-0.1.6.canopus
+│   ├── dist/nespro-0.1.7.canopus
 │   └── src/
 │       ├── lib.rs              # 生命周期、launcher 注册、LVGL 页面、定时器、分配器
 │       └── nes_frame.rs        # 调色板 → RGB565 转换（设备与主机共用）
@@ -27,7 +27,7 @@
 
 **模块描述符**（`canopus_module_descriptor`，ABI 2）：
 
-- `module_id = "nespro"`、`version = "0.1.6"`、`target_id = env!("CANOPUS_TARGET_ID")`
+- `module_id = "nespro"`、`version = "0.1.7"`、`target_id = env!("CANOPUS_TARGET_ID")`
 - flags：`FLAG_HAS_NATIVE_APP | FLAG_REGISTERS_LAUNCHER_ENTRY | FLAG_APP_UNREGISTER_REBOOT_REQUIRED`
 - 生命周期：`prepare` 保存 ctx；`activate` 记录日志；`stop` 释放标记；`query` 返回 `0x4E455350`（"NESP"）
 
@@ -76,7 +76,7 @@ CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus canopus build
 # 3) 打包并校验
 CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus canopus package --build
 CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus \
-  canopus package verify dist/nespro-0.1.6.canopus
+  canopus package verify dist/nespro-0.1.7.canopus
 
 # 4) 主机侧画面验证（可选，重新生成 out/*.ppm/*.png）
 cd /workspace/nes-band10pro/hostverify
@@ -87,15 +87,15 @@ cargo run --release -- ../roms/nespro-test.nes out
 
 | 产物 | 绝对路径 | sha256 | 说明 |
 | --- | --- | --- | --- |
-| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `508618fe2b96347eaa1784d63d7779fa92f31be3c7031d60a2e629f1f8621def` | verifier PASS：15 sections、455,508 resident bytes、0 undefined、15,385 relocs、1 ctor / 1 dtor |
-| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.6.canopus` | `e4fbbc8006e5ab173e753bfacccb573eeedd335e9e29c8273d4beb70e2fd0494` | 497,664 B；`package verify` OK；1 target |
+| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `b00790aacca793a70103c7c062d7624c6b03a1a6dd31991de0b8d1eb01f36e5a` | verifier PASS：15 sections、768,432 resident bytes、0 undefined、15,385 relocs、1 ctor / 1 dtor |
+| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.7.canopus` | `cb78b2af6117299756b8a96de9ad2c3027ee470ee98f1e637ede090168dc6110` | 497,664 B；`package verify` OK；1 target |
 | 测试 ROM | `/workspace/nes-band10pro/roms/nespro-test.nes` | 生成脚本可复现 | 16,400 B（16 B header + 16 KiB PRG，CHR RAM） |
 
 ### `.canopus` 包结构（tar）
 
 ```
 artifacts/xiaomi-band-10-pro-3.101.043/module.elf   (680,616 B, sha256 = ELF 的 sha256)
-manifest.json                                       (module_id nespro, version 0.1.6, abi 2, target_pack_revision 8)
+manifest.json                                       (module_id nespro, version 0.1.7, abi 2, target_pack_revision 8)
 receipts/xiaomi-band-10-pro-3.101.043.cmi           (CMI2 receipt, 176 B)
 ```
 
@@ -204,3 +204,19 @@ ROM 放置：`/data/canopus/nespro.nes`（不存在时自动使用内嵌测试 R
 
 1. 文件首行写入 `ver=0.1.6 tick=lv`，可直接确认是哪一版、用的哪种计时；
 2. 页面第一次 `on_pause`（息屏）且已有 tick 时也写一次，不必非要真正销毁页面才能拿到数据。
+
+
+## 15. 0.1.7：用 opt-level=3 覆盖 canopus 的 z
+
+0.1.6 的 LVGL tick 数据与原版几乎一致（`instr_per_s≈23k`，`budget=512`），证明耗时在模拟循环本身：约 30 µs/6502 指令。`canopus build` 在 `cli/canopus/src/project.rs` 中强制设置 `CARGO_PROFILE_RELEASE_OPT_LEVEL="z"`（体积优先），对解释器循环非常不利。
+
+构建命令追加：
+
+```bash
+RUSTFLAGS="-C opt-level=3" canopus build
+RUSTFLAGS="-C opt-level=3" canopus package --build
+```
+
+CLI 会把已有 `RUSTFLAGS` 原样保留并追加 `-C target-cpu=cortex-m33`，因此命令行的 `-C opt-level=3` 覆盖 profile 的 `z`。代价是模块 resident 从 455 KB 涨到 768 KB（fat LTO 版为 785 KB，反而小不了多少）。
+
+若设备加载 768 KB 镜像失败，可退回 `-C opt-level=2`；若速度仍不足，下一步是 patch x-nes：跳过 APU（`bus.apu.tick*`）或减少 `TABLE` 间接分派。
