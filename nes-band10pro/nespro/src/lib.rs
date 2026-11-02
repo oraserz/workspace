@@ -35,13 +35,13 @@ use nes_frame::{NES_HEIGHT, NES_PIXELS, NES_WIDTH, convert_frame};
 
 const MAGIC: u32 = 0x4E455350; // "NESP"
 #[cfg(offscreen)]
-const MODULE_VERSION: &[u8] = b"0.2.0";
+const MODULE_VERSION: &[u8] = b"0.2.1";
 #[cfg(not(offscreen))]
-const MODULE_VERSION: &[u8] = b"0.1.7";
+const MODULE_VERSION: &[u8] = b"0.1.8";
 #[cfg(offscreen)]
-const BUILD_ID: &[u8] = b"nespro-0.2.0-offscreen";
+const BUILD_ID: &[u8] = b"nespro-0.2.1-offscreen";
 #[cfg(not(offscreen))]
-const BUILD_ID: &[u8] = b"nespro-0.1.7";
+const BUILD_ID: &[u8] = b"nespro-0.1.8";
 /// The Supervisor time pump is an LVGL timer on the UI task, so every callback
 /// steals UI time. Fire often and keep each slice small instead of doing a
 /// whole frame at once.
@@ -65,6 +65,8 @@ const PENDING_MAX_TICKS: u32 = 3;
 const BENCH_BUDGET: u32 = 20_000;
 #[cfg(offscreen)]
 const BENCH_TARGET_INSTR: u32 = 500_000;
+#[cfg(offscreen)]
+const _: () = ();
 
 // ---------------------------------------------------------------------------
 // Context + allocator
@@ -261,6 +263,10 @@ static SLICE_MAX_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_TICK_MS: AtomicU32 = AtomicU32::new(0);
 static PENDING_TICKS: AtomicU32 = AtomicU32::new(0);
 static PERF_WRITTEN: AtomicU8 = AtomicU8::new(0);
+#[cfg(offscreen)]
+static PROBE_MS: AtomicU32 = AtomicU32::new(0);
+#[cfg(offscreen)]
+static PROBE_ACC: AtomicU32 = AtomicU32::new(0);
 
 // ---------------------------------------------------------------------------
 // Emulator state
@@ -482,9 +488,19 @@ unsafe fn write_perf(c: *const ContextV1) {
     } else {
         0
     };
+    let probe = {
+        #[cfg(offscreen)]
+        {
+            PROBE_MS.load(Ordering::Relaxed)
+        }
+        #[cfg(not(offscreen))]
+        {
+            0
+        }
+    };
     let text = alloc::format!(
-        "ver={} mode={} tick=lv\nticks={} instr={} frames={} published={} avg_slice_ms={} max_slice_ms={} session_ms={} instr_per_s={} ns_per_instr={} budget={}\n",
-        version, mode, ticks, instructions, frames, published, avg, max, session, ips, ns,
+        "ver={} mode={} tick=lv\nticks={} instr={} frames={} published={} avg_slice_ms={} max_slice_ms={} session_ms={} instr_per_s={} ns_per_instr={} probe_1m_ms={} budget={}\n",
+        version, mode, ticks, instructions, frames, published, avg, max, session, ips, ns, probe,
         BUDGET.load(Ordering::Relaxed)
     );
     let _ = canopus_runtime::fs::write_all(ctx_ref, "perf.txt", text.as_bytes());
@@ -617,6 +633,17 @@ extern "C" fn bench_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_void
             EMU_READY = true;
         }
         let start = now_ms(c);
+        if TICKS.load(Ordering::Relaxed) == 0 {
+            // One million plain integer iterations: separates a weak CPU from
+            // a CPU that is merely shared with the rest of the firmware.
+            let probe_start = now_ms(c);
+            let mut x: u32 = 0x1234_5678;
+            for _ in 0..1_000_000u32 {
+                x = core::hint::black_box(x.wrapping_mul(1_664_525).wrapping_add(1_013_904_223));
+            }
+            PROBE_ACC.store(x, Ordering::Relaxed);
+            PROBE_MS.store(now_ms(c).wrapping_sub(probe_start), Ordering::Relaxed);
+        }
         if SESSION_START_MS.load(Ordering::Acquire) == 0 {
             SESSION_START_MS.store(start.max(1), Ordering::Release);
         }

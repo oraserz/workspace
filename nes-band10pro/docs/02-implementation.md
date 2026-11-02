@@ -8,7 +8,7 @@
 │   ├── Canopus.toml            # module id/version/kind=target, targets = 043
 │   ├── Cargo.toml              # staticlib；依赖 canopus-abi/runtime/target-private/target-generated + x-nes
 │   ├── build/xiaomi-band-10-pro-3.101.043/nespro.elf
-│   ├── dist/nespro-0.1.7.canopus
+│   ├── dist/nespro-0.1.8.canopus
 │   └── src/
 │       ├── lib.rs              # 生命周期、launcher 注册、LVGL 页面、定时器、分配器
 │       └── nes_frame.rs        # 调色板 → RGB565 转换（设备与主机共用）
@@ -27,7 +27,7 @@
 
 **模块描述符**（`canopus_module_descriptor`，ABI 2）：
 
-- `module_id = "nespro"`、`version = "0.1.7"`、`target_id = env!("CANOPUS_TARGET_ID")`
+- `module_id = "nespro"`、`version = "0.1.8"`、`target_id = env!("CANOPUS_TARGET_ID")`
 - flags：`FLAG_HAS_NATIVE_APP | FLAG_REGISTERS_LAUNCHER_ENTRY | FLAG_APP_UNREGISTER_REBOOT_REQUIRED`
 - 生命周期：`prepare` 保存 ctx；`activate` 记录日志；`stop` 释放标记；`query` 返回 `0x4E455350`（"NESP"）
 
@@ -76,7 +76,7 @@ CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus canopus build
 # 3) 打包并校验
 CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus canopus package --build
 CANOPUS_ROOT=/workspace/nes-band10pro/vendor/canopus \
-  canopus package verify dist/nespro-0.1.7.canopus
+  canopus package verify dist/nespro-0.1.8.canopus
 
 # 4) 主机侧画面验证（可选，重新生成 out/*.ppm/*.png）
 cd /workspace/nes-band10pro/hostverify
@@ -87,15 +87,15 @@ cargo run --release -- ../roms/nespro-test.nes out
 
 | 产物 | 绝对路径 | sha256 | 说明 |
 | --- | --- | --- | --- |
-| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `cf08ff106d7a4ef61a14b467e67640b16e7217b532a47a46cd4d2c24f117780b` | verifier PASS：15 sections、769,460 resident bytes、0 undefined、15,385 relocs、1 ctor / 1 dtor |
-| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.7.canopus` | `e626af631356ae86e59d4e485a7b910670e3ee4cdb8020877c4d427833774337` | 497,664 B；`package verify` OK；1 target |
+| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `6ab40631ae8a386e09681369268e08ea2add78087a2c9a67c0326ef4f1902efa` | verifier PASS：15 sections、771,116 resident bytes、0 undefined、15,385 relocs、1 ctor / 1 dtor |
+| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.8.canopus` | `a100a71ee491ac47c13c20964cde200574b54f3b7b98821cd8b434f87b218a00` | 497,664 B；`package verify` OK；1 target |
 | 测试 ROM | `/workspace/nes-band10pro/roms/nespro-test.nes` | 生成脚本可复现 | 16,400 B（16 B header + 16 KiB PRG，CHR RAM） |
 
 ### `.canopus` 包结构（tar）
 
 ```
 artifacts/xiaomi-band-10-pro-3.101.043/module.elf   (680,616 B, sha256 = ELF 的 sha256)
-manifest.json                                       (module_id nespro, version 0.1.7, abi 2, target_pack_revision 8)
+manifest.json                                       (module_id nespro, version 0.1.8, abi 2, target_pack_revision 8)
 receipts/xiaomi-band-10-pro-3.101.043.cmi           (CMI2 receipt, 176 B)
 ```
 
@@ -232,3 +232,8 @@ RUSTFLAGS="-C opt-level=3 --cfg offscreen" canopus package --build
 ```
 
 行为：页面不创建任何控件；`bench_tick` 每跳固定执行 20,000 条指令，累计 500,000 条后停止并写 `perf.txt`。文件字段含 `mode=offscreen` 与 `ns_per_instr`（会话毫秒 ÷ 指令数，直接给出每指令纳秒成本）。测完需先 REMOVE 0.2.0，再装回 0.1.7。
+
+
+## 17. 0.1.8：no_audio + CPU 探针
+
+x-nes 的 `tick()` 中 APU/DMC 相关调用用 `#[cfg(not(no_audio))]` 包起来，构建时加 `--cfg no_audio` 即可跳过（音频未接）。离屏包 0.2.1 在第一个 tick 额外执行 100 万次 `black_box` 整数循环，结果写在 `perf.txt` 的 `probe_1m_ms`，用于判断 CPU 能力与占用。

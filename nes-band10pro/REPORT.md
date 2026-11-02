@@ -18,14 +18,14 @@
 
 | 交付物 | 路径 | 校验 |
 | --- | --- | --- |
-| 可安装模块包 | `deliverables/nespro-0.1.7.canopus` | 636,928 B；sha256 `e626af631356ae86e59d4e485a7b910670e3ee4cdb8020877c4d427833774337`；`package verify` → `package OK` |
-| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `cf08ff106d7a4ef61a14b467e67640b16e7217b532a47a46cd4d2c24f117780b`；`PASS (15 sections, 769460 resident bytes, 0 undefined, 2762 relocs, 1 ctors, 1 dtors)` |
+| 可安装模块包 | `deliverables/nespro-0.1.8.canopus` | 637,952 B；sha256 `a100a71ee491ac47c13c20964cde200574b54f3b7b98821cd8b434f87b218a00`；`package verify` → `package OK` |
+| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `6ab40631ae8a386e09681369268e08ea2add78087a2c9a67c0326ef4f1902efa`；`PASS (15 sections, 771116 resident bytes, 0 undefined, 2743 relocs, 1 ctors, 1 dtors)` |
 | Launcher 安装器 | `deliverables/nespro-installer-xiaomi-band-10-pro/`、`.zip` | 含新 ELF/CMI |
 | 自产测试 ROM | `roms/nespro-test.nes` | NROM-128 / mapper 0 / CHR RAM |
-| 离屏基准包 | `deliverables/nespro-0.2.0-offscreen.canopus` | 633,344 B；sha256 `544d04d3fa52cc1e80347a6fbd3242261105cc1ed4fe2f3aefa96c764c92e6a5`；`RUSTFLAGS="-C opt-level=3 --cfg offscreen"` 构建，页面上不做任何显示，跑 500,000 条指令后写 `perf.txt`（`mode=offscreen`、`ns_per_instr`） |
+| 离屏基准包 | `deliverables/nespro-0.2.1-offscreen.canopus` | 634,368 B；sha256 `3fe84a62f9cfd6183094c7d08fe8810441fe447249c2cf76717de28ff293ebec`；`RUSTFLAGS="-C opt-level=3 --cfg offscreen --cfg no_audio"` 构建，页面上不做任何显示，跑 500,000 条指令后写 `perf.txt`（`mode=offscreen`、`ns_per_instr`、`probe_1m_ms`） |
 | 期望画面脚本 | `/workspace/verify/nespro/make_expected.py` | 输出 256×240 / 336×315 / 整页 PNG，13 色 |
 
-**版本号提升到 0.1.7**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。
+**版本号提升到 0.1.8**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。
 
 ## 3. 卡死根因（已修复）
 
@@ -115,3 +115,14 @@ instr_per_s=23174 budget=512
 ```
 
 换成 LVGL tick 后数字几乎不变 → **计时不是瓶颈，每指令 ~30 µs 是真实成本**。在 `canopus build` 源码里发现它强制设置 `CARGO_PROFILE_RELEASE_OPT_LEVEL="z"`（体积优先）。0.1.7 通过 `RUSTFLAGS="-C opt-level=3"` 覆盖为速度优先（比 fat LTO 版本小 16 KB）。模块镜像增大到 768 KB，需确认设备可加载。
+
+
+## 11. 0.1.8：关闭 APU + CPU 探针
+
+离屏数据表明开屏/离屏的每指令成本几乎一致（~19–27 µs），显示路径不是瓶颈。0.1.8 在 x-nes `tick()` 用 `#[cfg(no_audio)]` 跳过 APU 帧计数、DMC 与 DMA 相关逻辑（不接音频），构建：
+
+```bash
+RUSTFLAGS="-C opt-level=3 --cfg no_audio" canopus package --build
+```
+
+0.2.1 离屏基准在此基础上加入 100 万次整数循环探针（`probe_1m_ms`），用来区分「CPU 本身弱」与「CPU 被固件共享」：若 100 万次平凡循环都要数秒，帧率就没有优化空间。

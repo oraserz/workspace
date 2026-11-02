@@ -3,7 +3,7 @@
 - 仓库/分支：`https://github.com/oraserz/workspace.git`，`trae/agent-GbKpGn`
 - vendor：Canopus `4928f1eb`、x-nes `ca4c3955`（本地 symlink 到 `/workspace/.projects/*`，未修改模块管理器源码）
 - 上次执行时间：2026-11-01
-- 当前阶段：0.1.7（O3）+ 0.2.0 离屏基准包（`--cfg offscreen`），待用离屏数据区分核心/显示瓶颈
+- 当前阶段：0.1.8 关闭 APU（`--cfg no_audio`）+ 0.2.1 离屏基准（含 `probe_1m_ms` 的 100 万次整数探针），待真机复测
 
 ## 已完成
 
@@ -35,7 +35,7 @@
 ### 0.1.6（commit `3d17e9a`）
 - 用户上报的 perf 两次数值完全一致（1331/675023/69/8/16/93/30770/21937/512），判断为 0.1.4 遗留文件；0.1.5 的 LVGL tick 尚未真正测到。
 - perf.txt 首行加 `ver=0.1.6 tick=lv`；页面首次 pause（息屏）且有 tick 时也写一次。
-### 0.1.7（commit `34f17b3`，本次重建）
+### 0.1.7（commit `34f17b3`）
 - 0.1.6 真机（LVGL tick）数据：`ticks=1289 instr=653743 frames=67 published=10 avg_slice_ms=15 max_slice_ms=92 session_ms=28209 instr_per_s=23174 budget=512` → 每指令约 30 µs，计时不是瓶颈。
 - 发现 `canopus build` 强制 `CARGO_PROFILE_RELEASE_OPT_LEVEL="z"`；改用 `RUSTFLAGS="-C opt-level=3"` 覆盖。
 - 版本 0.1.7（version_code 8）重建：`deliverables/nespro-0.1.7.canopus`（636,928 B，sha256 `e626af63…4337`），ELF sha256 `cf08ff10…780b`，resident 769,460 B。
@@ -44,8 +44,9 @@
 
 ## 未完成 / 待用户测试
 
-1. 装 0.2.0 离屏包 → 进 NES 页面（空白页是预期）→ 等它跑完 50 万条指令自动停 → 读 `perf.txt`，看 `mode=offscreen` 与 `ns_per_instr`。
-2. 测完先 REMOVE 0.2.0，再装回 0.1.7；若 `ns_per_instr` ≈ 17 µs，说明瓶颈在 x-nes 核心本身，下一步 patch x-nes（跳过 APU、减少间接分派）。
+1. 装 0.2.1 离屏包（空白页）→ 等自动跑完 50 万条 → 读 `perf.txt`，重点看 `probe_1m_ms` 与 `ns_per_instr`。
+2. 若 `probe_1m_ms` 很大（>2–3 s），说明 CPU 本身弱/被占用，帧率上限有限；若显著下降（APU 砍掉带来收益），再考虑提高 `DUTY_PERCENT` 或继续优化分派。
+3. 测完 REMOVE 0.2.1，装回 0.1.8（不开音频、正常显示）。
 2. 观察打开/退出是否跟手；帧率是否符合预期。
 3. **把 `/data/canopus/m.nespro/perf.txt` 的内容发回来**，按 `instr_per_s` / `avg_slice_ms` 调 `SLICE_TARGET_MS` 与 `PUBLISH_MIN_MS`。
 4. 超级玛丽：ROM 放到 `/data/canopus/m.nespro/nespro.nes`（或 `supermary.nes`）。
