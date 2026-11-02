@@ -18,13 +18,13 @@
 
 | 交付物 | 路径 | 校验 |
 | --- | --- | --- |
-| 可安装模块包 | `deliverables/nespro-0.1.5.canopus` | 497,664 B；sha256 `da853dc86aa10e2d3e757aa8dffc1fc58bc8293842cc3f4e441fa8157b434e5c`；`package verify` → `package OK` |
-| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `6be3bd40a06a9f0e9d10328e98c9f9be89239613fde6720ef42c4d79ca854d72`；`PASS (15 sections, 455424 resident bytes, 0 undefined, 15381 relocs, 1 ctors, 1 dtors)` |
+| 可安装模块包 | `deliverables/nespro-0.1.6.canopus` | 497,664 B；sha256 `e4fbbc8006e5ab173e753bfacccb573eeedd335e9e29c8273d4beb70e2fd0494`；`package verify` → `package OK` |
+| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `508618fe2b96347eaa1784d63d7779fa92f31be3c7031d60a2e629f1f8621def`；`PASS (15 sections, 455508 resident bytes, 0 undefined, 15384 relocs, 1 ctors, 1 dtors)` |
 | Launcher 安装器 | `deliverables/nespro-installer-xiaomi-band-10-pro/`、`.zip` | 含新 ELF/CMI |
 | 自产测试 ROM | `roms/nespro-test.nes` | NROM-128 / mapper 0 / CHR RAM |
 | 期望画面脚本 | `/workspace/verify/nespro/make_expected.py` | 输出 256×240 / 336×315 / 整页 PNG，13 色 |
 
-**版本号提升到 0.1.5**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。
+**版本号提升到 0.1.6**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。
 
 ## 3. 卡死根因（已修复）
 

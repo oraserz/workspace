@@ -247,6 +247,7 @@ static SLICE_SUM_MS: AtomicU32 = AtomicU32::new(0);
 static SLICE_MAX_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_TICK_MS: AtomicU32 = AtomicU32::new(0);
 static PENDING_TICKS: AtomicU32 = AtomicU32::new(0);
+static PERF_WRITTEN: AtomicU8 = AtomicU8::new(0);
 
 // ---------------------------------------------------------------------------
 // Emulator state
@@ -462,10 +463,11 @@ unsafe fn write_perf(c: *const ContextV1) {
         0
     };
     let text = alloc::format!(
-        "ticks={} instr={} frames={} published={} avg_slice_ms={} max_slice_ms={} session_ms={} instr_per_s={} budget={}\n",
+        "ver=0.1.6 tick=lv\nticks={} instr={} frames={} published={} avg_slice_ms={} max_slice_ms={} session_ms={} instr_per_s={} budget={}\n",
         ticks, instructions, frames, published, avg, max, session, ips, BUDGET.load(Ordering::Relaxed)
     );
     let _ = canopus_runtime::fs::write_all(ctx_ref, "perf.txt", text.as_bytes());
+    PERF_WRITTEN.store(1, Ordering::Release);
 }
 
 /// UI timer-tick: emulate for at most one small slice, then hand the finished
@@ -702,6 +704,7 @@ extern "C" fn page_on_create(
         SLICE_MAX_MS.store(0, Ordering::Release);
         LAST_TICK_MS.store(0, Ordering::Release);
         PENDING_TICKS.store(0, Ordering::Release);
+        PERF_WRITTEN.store(0, Ordering::Release);
         PAGE_ACTIVE.store(1, Ordering::Release);
         start_runtime(c);
     }
@@ -720,6 +723,12 @@ extern "C" fn page_on_pause(_page: *mut PageDescriptor) -> i32 {
     unsafe {
         PAGE_ACTIVE.store(0, Ordering::Release);
         stop_runtime(ctx(), false);
+        // Screen-off pauses the page; write the counters once so a session
+        // that never gets a real destroy still leaves evidence behind.
+        let c = ctx();
+        if PERF_WRITTEN.load(Ordering::Acquire) == 0 && TICKS.load(Ordering::Relaxed) > 0 {
+            write_perf(c);
+        }
     }
     0
 }
@@ -878,8 +887,8 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
         | FLAG_REGISTERS_LAUNCHER_ENTRY
         | FLAG_APP_UNREGISTER_REBOOT_REQUIRED,
     module_id: pack(b"nespro"),
-    module_version: pack(b"0.1.5"),
-    build_id: pack(b"nespro-0.1.5"),
+    module_version: pack(b"0.1.6"),
+    build_id: pack(b"nespro-0.1.6"),
     target_id: pack(env!("CANOPUS_TARGET_ID").as_bytes()),
     prepare: Some(canopus_mod_prepare),
     activate: Some(activate),
