@@ -18,10 +18,11 @@
 
 | 交付物 | 路径 | 校验 |
 | --- | --- | --- |
-| 可安装模块包 | `deliverables/nespro-0.1.7.canopus` | 634,880 B；sha256 `cb78b2af6117299756b8a96de9ad2c3027ee470ee98f1e637ede090168dc6110`；`package verify` → `package OK` |
-| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `b00790aacca793a70103c7c062d7624c6b03a1a6dd31991de0b8d1eb01f36e5a`；`PASS (15 sections, 768432 resident bytes, 0 undefined, 2745 relocs, 1 ctors, 1 dtors)` |
+| 可安装模块包 | `deliverables/nespro-0.1.7.canopus` | 636,928 B；sha256 `e626af631356ae86e59d4e485a7b910670e3ee4cdb8020877c4d427833774337`；`package verify` → `package OK` |
+| 模块 ELF | `nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | sha256 `cf08ff106d7a4ef61a14b467e67640b16e7217b532a47a46cd4d2c24f117780b`；`PASS (15 sections, 769460 resident bytes, 0 undefined, 2762 relocs, 1 ctors, 1 dtors)` |
 | Launcher 安装器 | `deliverables/nespro-installer-xiaomi-band-10-pro/`、`.zip` | 含新 ELF/CMI |
 | 自产测试 ROM | `roms/nespro-test.nes` | NROM-128 / mapper 0 / CHR RAM |
+| 离屏基准包 | `deliverables/nespro-0.2.0-offscreen.canopus` | 633,344 B；sha256 `3ffd8f794f0d8c292ab416a0ffa203aa52f42b548413681b1899197113596296`；`RUSTFLAGS="-C opt-level=3 --cfg offscreen"` 构建，页面上不做任何显示，跑 500,000 条指令后写 `perf.txt`（`mode=offscreen`、`ns_per_instr`） |
 | 期望画面脚本 | `/workspace/verify/nespro/make_expected.py` | 输出 256×240 / 336×315 / 整页 PNG，13 色 |
 
 **版本号提升到 0.1.7**：同版本重复安装会被 Supervisor 判 `-105 STAGE_DUPLICATE`，不会替换已安装的旧二进制。

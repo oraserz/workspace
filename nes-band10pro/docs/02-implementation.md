@@ -87,8 +87,8 @@ cargo run --release -- ../roms/nespro-test.nes out
 
 | 产物 | 绝对路径 | sha256 | 说明 |
 | --- | --- | --- | --- |
-| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `b00790aacca793a70103c7c062d7624c6b03a1a6dd31991de0b8d1eb01f36e5a` | verifier PASS：15 sections、768,432 resident bytes、0 undefined、15,385 relocs、1 ctor / 1 dtor |
-| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.7.canopus` | `cb78b2af6117299756b8a96de9ad2c3027ee470ee98f1e637ede090168dc6110` | 497,664 B；`package verify` OK；1 target |
+| 模块 ELF | `/workspace/nes-band10pro/nespro/build/xiaomi-band-10-pro-3.101.043/nespro.elf` | `cf08ff106d7a4ef61a14b467e67640b16e7217b532a47a46cd4d2c24f117780b` | verifier PASS：15 sections、769,460 resident bytes、0 undefined、15,385 relocs、1 ctor / 1 dtor |
+| 安装包 | `/workspace/nes-band10pro/deliverables/nespro-0.1.7.canopus` | `e626af631356ae86e59d4e485a7b910670e3ee4cdb8020877c4d427833774337` | 497,664 B；`package verify` OK；1 target |
 | 测试 ROM | `/workspace/nes-band10pro/roms/nespro-test.nes` | 生成脚本可复现 | 16,400 B（16 B header + 16 KiB PRG，CHR RAM） |
 
 ### `.canopus` 包结构（tar）
@@ -220,3 +220,15 @@ RUSTFLAGS="-C opt-level=3" canopus package --build
 CLI 会把已有 `RUSTFLAGS` 原样保留并追加 `-C target-cpu=cortex-m33`，因此命令行的 `-C opt-level=3` 覆盖 profile 的 `z`。代价是模块 resident 从 455 KB 涨到 768 KB（fat LTO 版为 785 KB，反而小不了多少）。
 
 若设备加载 768 KB 镜像失败，可退回 `-C opt-level=2`；若速度仍不足，下一步是 patch x-nes：跳过 APU（`bus.apu.tick*`）或减少 `TABLE` 间接分派。
+
+
+## 16. 离屏基准（`--cfg offscreen`）
+
+为区分「模拟器核心慢」与「显示路径慢」，新增离屏构建：
+
+```bash
+# 临时把 Canopus.toml 的 version 改为 0.2.0 / version_code 9 后：
+RUSTFLAGS="-C opt-level=3 --cfg offscreen" canopus package --build
+```
+
+行为：页面不创建任何控件；`bench_tick` 每跳固定执行 20,000 条指令，累计 500,000 条后停止并写 `perf.txt`。文件字段含 `mode=offscreen` 与 `ns_per_instr`（会话毫秒 ÷ 指令数，直接给出每指令纳秒成本）。测完需先 REMOVE 0.2.0，再装回 0.1.7。

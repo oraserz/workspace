@@ -34,6 +34,14 @@ use nes::{reset, Emulator};
 use nes_frame::{NES_HEIGHT, NES_PIXELS, NES_WIDTH, convert_frame};
 
 const MAGIC: u32 = 0x4E455350; // "NESP"
+#[cfg(offscreen)]
+const MODULE_VERSION: &[u8] = b"0.2.0";
+#[cfg(not(offscreen))]
+const MODULE_VERSION: &[u8] = b"0.1.7";
+#[cfg(offscreen)]
+const BUILD_ID: &[u8] = b"nespro-0.2.0-offscreen";
+#[cfg(not(offscreen))]
+const BUILD_ID: &[u8] = b"nespro-0.1.7";
 /// The Supervisor time pump is an LVGL timer on the UI task, so every callback
 /// steals UI time. Fire often and keep each slice small instead of doing a
 /// whole frame at once.
@@ -52,6 +60,11 @@ const PUBLISH_MIN_MS: u32 = 50;
 /// If the UI never consumes a queued frame, stop waiting after this many
 /// ticks instead of stalling the emulator forever.
 const PENDING_MAX_TICKS: u32 = 3;
+/// Off-screen benchmark: fixed budget, no display work, stop at this total.
+#[cfg(offscreen)]
+const BENCH_BUDGET: u32 = 20_000;
+#[cfg(offscreen)]
+const BENCH_TARGET_INSTR: u32 = 500_000;
 
 // ---------------------------------------------------------------------------
 // Context + allocator
@@ -462,9 +475,17 @@ unsafe fn write_perf(c: *const ContextV1) {
     } else {
         0
     };
+    let mode = if cfg!(offscreen) { "offscreen" } else { "onscreen" };
+    let version = core::str::from_utf8(MODULE_VERSION).unwrap_or("?");
+    let ns = if instructions > 0 {
+        (session as u64) * 1_000_000 / instructions as u64
+    } else {
+        0
+    };
     let text = alloc::format!(
-        "ver=0.1.7 tick=lv\nticks={} instr={} frames={} published={} avg_slice_ms={} max_slice_ms={} session_ms={} instr_per_s={} budget={}\n",
-        ticks, instructions, frames, published, avg, max, session, ips, BUDGET.load(Ordering::Relaxed)
+        "ver={} mode={} tick=lv\nticks={} instr={} frames={} published={} avg_slice_ms={} max_slice_ms={} session_ms={} instr_per_s={} ns_per_instr={} budget={}\n",
+        version, mode, ticks, instructions, frames, published, avg, max, session, ips, ns,
+        BUDGET.load(Ordering::Relaxed)
     );
     let _ = canopus_runtime::fs::write_all(ctx_ref, "perf.txt", text.as_bytes());
     PERF_WRITTEN.store(1, Ordering::Release);
@@ -581,6 +602,49 @@ extern "C" fn runtime_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_vo
     }
 }
 
+/// Off-screen benchmark tick: exercise the core with a fixed budget and no
+/// display work at all, then write the counters and stop.
+#[cfg(offscreen)]
+extern "C" fn bench_tick(c: *const ContextV1, _timer_id: i32, _data: *mut c_void) {
+    if PAGE_ACTIVE.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    unsafe {
+        if !EMU_READY {
+            if !ensure_emulator(c) {
+                return;
+            }
+            EMU_READY = true;
+        }
+        let start = now_ms(c);
+        if SESSION_START_MS.load(Ordering::Acquire) == 0 {
+            SESSION_START_MS.store(start.max(1), Ordering::Release);
+        }
+        TICKS.fetch_add(1, Ordering::Relaxed);
+        let emu = &mut *EMU.as_mut_ptr();
+        let mut executed = 0u32;
+        while executed < BENCH_BUDGET {
+            let _ = emu.tick();
+            executed += 1;
+            if emu.bus.ppu.frame_complete {
+                emu.bus.ppu.frame_complete = false;
+                FRAMES.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        INSTRUCTIONS.fetch_add(executed, Ordering::Relaxed);
+        let slice_ms = now_ms(c).wrapping_sub(start);
+        SLICE_SUM_MS.fetch_add(slice_ms, Ordering::Relaxed);
+        if slice_ms > SLICE_MAX_MS.load(Ordering::Relaxed) {
+            SLICE_MAX_MS.store(slice_ms, Ordering::Relaxed);
+        }
+        if INSTRUCTIONS.load(Ordering::Relaxed) >= BENCH_TARGET_INSTR {
+            PAGE_ACTIVE.store(0, Ordering::Release);
+            stop_runtime(c, true);
+            write_perf(c);
+        }
+    }
+}
+
 /// UI-task half of a frame: convert the indices, then swap the image source.
 extern "C" fn publish_frame(c: *const ContextV1, _data: *mut c_void) {
     unsafe {
@@ -616,7 +680,17 @@ unsafe fn start_runtime(c: *const ContextV1) {
     };
     let mut id = RUN_TIMER.load(Ordering::Acquire);
     if id < 0 {
-        id = unsafe { (time.timer_create)(c, TIMER_PERIOD_MS, 1, runtime_tick, null_mut()) };
+        let tick = {
+            #[cfg(offscreen)]
+            {
+                bench_tick
+            }
+            #[cfg(not(offscreen))]
+            {
+                runtime_tick
+            }
+        };
+        id = unsafe { (time.timer_create)(c, TIMER_PERIOD_MS, 1, tick, null_mut()) };
         if id < 0 {
             log_info(c, b"nespro timer create failed\0");
             return;
@@ -662,6 +736,25 @@ extern "C" fn page_on_create(
         return -1;
     }
     unsafe {
+        #[cfg(offscreen)]
+        {
+            let c = ctx();
+            BUDGET.store(BUDGET_START, Ordering::Release);
+            LAST_PUBLISH_MS.store(0, Ordering::Release);
+            SESSION_START_MS.store(0, Ordering::Release);
+            TICKS.store(0, Ordering::Release);
+            INSTRUCTIONS.store(0, Ordering::Release);
+            FRAMES.store(0, Ordering::Release);
+            PUBLISHED.store(0, Ordering::Release);
+            SLICE_SUM_MS.store(0, Ordering::Release);
+            SLICE_MAX_MS.store(0, Ordering::Release);
+            LAST_TICK_MS.store(0, Ordering::Release);
+            PENDING_TICKS.store(0, Ordering::Release);
+            PERF_WRITTEN.store(0, Ordering::Release);
+            PAGE_ACTIVE.store(1, Ordering::Release);
+            start_runtime(c);
+            return 0;
+        }
         let content = lvx_content_create(root);
         let parent = if content.is_null() {
             root
@@ -887,8 +980,8 @@ pub static canopus_module_descriptor: ModuleDescriptorV1 = ModuleDescriptorV1 {
         | FLAG_REGISTERS_LAUNCHER_ENTRY
         | FLAG_APP_UNREGISTER_REBOOT_REQUIRED,
     module_id: pack(b"nespro"),
-    module_version: pack(b"0.1.7"),
-    build_id: pack(b"nespro-0.1.7"),
+    module_version: pack(MODULE_VERSION),
+    build_id: pack(BUILD_ID),
     target_id: pack(env!("CANOPUS_TARGET_ID").as_bytes()),
     prepare: Some(canopus_mod_prepare),
     activate: Some(activate),
