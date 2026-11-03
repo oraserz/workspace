@@ -1,0 +1,13 @@
+# 构建产物与中间文件不提交
+/target/
+/out/
+build/
+dist/
+*.canopus
+*.elf
+*.o
+*.a
+
+# 版权 ROM / 固件 bin 不提交（resource.bin 是唯一例外）
+*.nes
+*.unpacked/
